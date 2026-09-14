@@ -101,7 +101,8 @@ sequenceDiagram
 ```bash
 # 1) 先跑起共享项目库（另一个仓库）
 git clone https://github.com/Paeonia-wh/codex-memory.git
-cd codex-memory && ./scripts/start-services.ps1
+cd codex-memory/repo && ./scripts/start-services.ps1
+#    详细步骤见：https://github.com/Paeonia-wh/codex-memory/blob/main/docs/SETUP.md
 
 # 2) 再跑这个面板
 git clone https://github.com/Paeonia-wh/shared-lib-panel.git
