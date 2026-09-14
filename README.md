@@ -5,6 +5,18 @@
 > AI 之间怎么交接、踩过什么坑、下一步干什么——那些由库来说；
 > 你只需要看到：**这个项目拆成了几个任务、完成了几个。**
 
+---
+
+**English** — A minimal, **read-only** floating-ball panel that shows the progress of projects coordinated by
+multiple AI agents. It sits on your desktop as a draggable orb (right-top corner by default), and expands into a
+compact card list: *project name · status · done/total · task squares*. Click a task to copy a ready-to-paste
+handoff prompt; paste it into any agent (DeepSeek Harness, Codex, …) and the agent picks up the work, writes its
+results back to the shared library, and the panel updates itself in real time via SSE.
+
+Built with **Tauri 2 + Rust + TypeScript**, data comes straight from PostgreSQL (read-only), no framework on the
+frontend. Requires the [codex-memory](https://github.com/Paeonia-wh/codex-memory) backend.
+
+
 ![只有一颗球](docs/01-ball-only.png)
 <p align="center"><sub>开机后桌面上只有一颗球 · 点它才展开</sub></p>
 
@@ -108,8 +120,12 @@ cd codex-memory/repo && ./scripts/start-services.ps1
 git clone https://github.com/Paeonia-wh/shared-lib-panel.git
 cd shared-lib-panel
 npm install
-npm run dev          # 开发模式
-npm run build        # 打包
+npm run dev                  # 开发模式（热重载）
+npm run build                # 出正式安装包（Tauri bundle）
+
+# 只编译不打包（想直接跑 exe 时用这个，快很多）
+cd src-tauri && cargo build --release
+# 产物：src-tauri/target/release/shared-lib-panel.exe
 ```
 
 ### 配置（可选，都有默认值）
