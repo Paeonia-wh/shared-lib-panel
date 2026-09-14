@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>共享项目库 · 多智能体项目状态控制平面</title>
+<meta name="description" content="多个 AI 会话共用一个项目状态库，你用一个悬浮球面板看进度。">
+<style>
+  :root {
+    --ink: #0b0b0e; --ink2: #55555e; --ink3: #8e8e99;
+    --line: rgba(11,11,14,.08); --bg: #fbfbfd; --card: #fff;
+    --green: #17a06b; --blue: #3b7ef6; --amber: #c08a1e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 56px 24px 80px; }
+  h1 { font-size: 40px; letter-spacing: -.02em; margin: 0 0 12px; font-weight: 700; }
+  .lead { font-size: 17px; color: var(--ink2); margin: 0 0 8px; }
+  .sub { font-size: 13.5px; color: var(--ink3); margin: 0 0 28px; }
+  .links { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 52px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13.5px; font-weight: 600; text-decoration: none;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    padding: 9px 15px; border-radius: 10px; transition: .18s;
+  }
+  .btn:hover { border-color: rgba(11,11,14,.2); transform: translateY(-1px); }
+  .btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .btn.primary:hover { background: #000; }
+
+  h2 { font-size: 13px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+       color: var(--ink3); margin: 0 0 18px; }
+  section { margin-bottom: 56px; }
+
+  .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 820px) { .shots { grid-template-columns: 1fr; } h1 { font-size: 30px; } }
+  figure { margin: 0; }
+  figure img {
+    width: 100%; display: block; border-radius: 14px; background: #fff;
+    border: 1px solid var(--line); box-shadow: 0 12px 32px -18px rgba(11,11,14,.35);
+  }
+  figcaption { font-size: 12.5px; color: var(--ink3); margin-top: 10px; text-align: center; }
+
+  .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; align-items: stretch; }
+  @media (max-width: 820px) { .flow { grid-template-columns: 1fr; } }
+  .step {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px 14px 15px; position: relative;
+  }
+  .step .n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 50%; background: var(--ink); color: #fff;
+    font-size: 11px; font-weight: 700; margin-bottom: 9px;
+  }
+  .step .t { font-size: 13px; font-weight: 650; margin-bottom: 4px; }
+  .step .d { font-size: 11.5px; color: var(--ink3); line-height: 1.6; }
+  .step .who { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; margin-top: 8px; }
+  .who.you { color: var(--blue); } .who.ai { color: var(--amber); } .who.lib { color: var(--green); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink3); font-weight: 650; }
+  td:first-child { font-weight: 600; width: 130px; }
+  .tbl-wrap { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+
+  .note { font-size: 13px; color: var(--ink2); background: #f4f6f9; border-radius: 12px; padding: 16px 18px; line-height: 1.75; }
+  .note b { color: var(--ink); }
+  footer { font-size: 12.5px; color: var(--ink3); border-top: 1px solid var(--line); padding-top: 22px; }
+  a { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>共享项目库</h1>
+  <p class="lead">多个 AI 会话共用一个项目状态库，你用一个悬浮球面板看进度。</p>
+  <p class="sub">AI 之间怎么交接、踩过什么坑、下一步干什么 —— 那些由库来说。你只需要看到：这个项目拆成了几个任务、完成了几个。</p>
+
+  <div class="links">
+    <a class="btn primary" href="https://github.com/Paeonia-wh/shared-lib-panel">悬浮球面板 →</a>
+    <a class="btn" href="https://github.com/Paeonia-wh/codex-memory">共享项目库（后端）→</a>
+    <a class="btn" href="https://github.com/Paeonia-wh/codex-memory/blob/main/docs/SETUP.md">环境搭建 →</a>
+  </div>
+
+  <section>
+    <h2>界面</h2>
+    <div class="shots">
+      <figure><img src="01-ball-only.png" alt="只有一颗球的桌面"><figcaption>开机 · 桌面只有一颗球</figcaption></figure>
+      <figure><img src="02-panel-open.png" alt="展开的项目面板"><figcaption>点开 · 项目名 / 状态 / 完成数</figcaption></figure>
+      <figure><img src="03-tasks.png" alt="任务列表"><figcaption>点进 · 每个任务可单独复制</figcaption></figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>一条路走完</h2>
+    <div class="flow">
+      <div class="step"><div class="n">1</div><div class="t">规划</div><div class="d">对 AI 说"拆成几块放进共享库"，它建项目、拆任务、写验收标准。</div><div class="who ai">AI 干活</div></div>
+      <div class="step"><div class="n">2</div><div class="t">派活</div><div class="d">在面板里点项目 → 点任务 → 复制接续块。那段文本自带指令。</div><div class="who you">你操作</div></div>
+      <div class="step"><div class="n">3</div><div class="t">接手</div><div class="d">粘进任意会话。AI 读上下文（含别人踩过的坑）后开始干。</div><div class="who ai">AI 干活</div></div>
+      <div class="step"><div class="n">4</div><div class="t">沉淀</div><div class="d">干完自动写库：检查点、产物、任务状态 —— 不用你催。</div><div class="who lib">库记录</div></div>
+      <div class="step"><div class="n">5</div><div class="t">同步</div><div class="d">库一变，面板毫秒级自己更新。待开始 → 进行中 → 已完成。</div><div class="who lib">自动</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>两部分各干什么</h2>
+    <div class="tbl-wrap">
+      <table>
+        <tr><th></th><th>共享项目库（后端）</th><th>悬浮球面板（前端）</th></tr>
+        <tr><td>给谁看</td><td><b>AI 之间</b></td><td><b>人</b></td></tr>
+        <tr><td>管什么</td><td>项目、任务、依赖、租约、合同、检查点、决策、踩过的坑、代码地图、审计事件</td><td>项目名、状态、完成了几个 / 共几个</td></tr>
+        <tr><td>怎么用</td><td>AI 通过 MCP 工具读写</td><td>点球展开、点任务复制一句指令</td></tr>
+        <tr><td>不做什么</td><td>不存聊天记录、不存私有推理</td><td><b>不写库</b>（只读 + 复制文本）</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>设计原则</h2>
+    <div class="note">
+      <b>一份事实来源，两个消费者。</b><br>
+      所有真实数据都在 PostgreSQL 里，AI 读结构化数据、人看极简进度。面板<b>绝不自己发明状态</b>：所有数字都来自库 ——
+      改了库，面板就跟着变。人看到的东西和 AI 看到的永远不会打架。<br><br>
+      <b>面板只负责两件事：下指令、看结果。</b><br>
+      它不写库、不派活、不判断对错。真活由 AI 干、事实由库记 —— 这样每条变更都有出处可查，
+      也不会出现"人改了 AI 正在做的任务"这种事故。
+    </div>
+  </section>
+
+  <footer>
+    MIT License · 由 <a href="https://github.com/Paeonia-wh">Paeonia-wh</a> 构建 ·
+    悬浮球形象来自 <a href="https://github.com/jeremy-prt/bloub">bloub</a>（MIT）
+  </footer>
+
+</div>
+</body>
+</html>
