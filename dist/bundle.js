@@ -50,10 +50,10 @@
     for (let i = 0; i <= N; i++) {
       const th = spin2 + i / N * span;
       const ct = Math.cos(th);
-      const st = Math.sin(th);
-      const x = seed.a * (ct * cu + st * -su * seed.k) + seed.cx;
-      const y = seed.a * (ct * su + st * cu * seed.k) + seed.cy;
-      const z = seed.a * st * kz;
+      const st2 = Math.sin(th);
+      const x = seed.a * (ct * cu + st2 * -su * seed.k) + seed.cx;
+      const y = seed.a * (ct * su + st2 * cu * seed.k) + seed.cy;
+      const z = seed.a * st2 * kz;
       const behind = z < 0;
       const sx2 = r2(x * scale);
       const sy2 = r2(y * scale);
@@ -4100,8 +4100,8 @@
   }
   function tickAutoplay(now) {
     if (autoPlistState) {
-      const st = autoPlistState;
-      const hold = ACTION_HOLD[st] ?? 2.4;
+      const st2 = autoPlistState;
+      const hold = ACTION_HOLD[st2] ?? 2.4;
       if (now - lastAutoStart >= hold) {
         setBotState("idle", now);
         autoPlistState = null;
@@ -4329,9 +4329,22 @@
       sub: String(r.root_path || "").replace(/^[A-Z]:\\/i, ""),
       scope: String(r.scope || "").trim(),
       tags: parseTags(r.tags),
-      ago: relTime(r.updated_at),
+      /* 卡面上的"多久前"用活动信号（含任务更新）—— 它比"真干活"宽松一点，
+         但对用户更有信息量（能看到"刚才有人动过这个项目"）。 */
+      ago: activityText(
+        typeof r.last_activity_min === "number" && r.last_activity_min >= 0 ? r.last_activity_min : typeof r.last_work_min === "number" && r.last_work_min >= 0 ? r.last_work_min : Math.round((Date.now() - Date.parse(String(r.updated_at || "").trim().replace(" ", "T"))) / 6e4)
+      ) || relTime(r.updated_at),
+      /* ⚠ 这三个字段的"缓存标志"历史（2026-09-15 审计发现的第 3 个高危 bug）：
+         原来写的是 `tasks: prev.fromDb ? prev.tasks : []` + `fromDb: false` ——
+         于是**第 1 次轮询**能把明细带过去（那时 prev.fromDb 还是 true），
+         **第 2 次轮询** prev.fromDb 已是 false → 明细被清成 []。
+         而"深度核对"的门槛正是 `if (!p.fromDb || !p.tasks.length) continue`，
+         结果它在项目列表视图下**跳过每一个项目**，还打印绿灯「一致（0 个项目）」——
+         **一直在假装核对过**。
+         修法：明细是有效缓存就带过来，并**保留** fromDb=true（它表示"这份明细来自数据库"，
+         不是"这次是新拉的"）。 */
       tasks: prev.get(r.project_key)?.fromDb ? prev.get(r.project_key).tasks : [],
-      fromDb: false,
+      fromDb: prev.get(r.project_key)?.fromDb === true,
       total: r.total,
       done: r.done,
       ready: r.ready,
@@ -4346,8 +4359,48 @@
       mapEdges: r.map_edges,
       artifacts: r.artifacts,
       sessions: r.sessions,
+      checkpoints: num(r.checkpoints),
+      liveClaims: num(r.live_claims),
+      staleClaims: num(r.stale_claims),
+      liveSessions: num(r.live_sessions),
+      lastActivityMin: typeof r.last_activity_min === "number" ? r.last_activity_min : -1,
+      lastWorkMin: typeof r.last_work_min === "number" ? r.last_work_min : -1,
+      liveTasks: num(r.live_tasks),
+      stalledTasks: num(r.stalled_tasks),
+      overdueEta: num(r.overdue_eta),
+      held: num(r.held),
       taskUpdatedAt: String(r.task_updated_at || "")
     }));
+    archivedProjects = list.filter((r) => r.control_state === "archived").map((r) => ({ key: r.project_key, name: r.name || r.project_key, total: num(r.total) }));
+    if (collecting) {
+      const now = Date.now();
+      for (const r of items) {
+        const before = prev.get(r.key);
+        if (!before) {
+          addedProjects.push(r.key);
+          continue;
+        }
+        const was = [before.total, before.done, before.ready, before.doing, before.review, before.failed].join("/");
+        const is = [r.total, r.done, r.ready, r.doing, r.review, r.failed].join("/");
+        if (was !== is) {
+          changedProjectCount++;
+          const bits = [];
+          if (r.done !== before.done) bits.push(`\u5B8C\u6210 ${before.done}\u2192${r.done}`);
+          if (r.doing !== before.doing) bits.push(`\u5728\u505A ${before.doing}\u2192${r.doing}`);
+          if (r.ready !== before.ready) bits.push(`\u5F85\u5F00\u59CB ${before.ready}\u2192${r.ready}`);
+          if (r.review !== before.review) bits.push(`\u5F85\u9A8C\u6536 ${before.review}\u2192${r.review}`);
+          if (r.total !== before.total) bits.push(`\u4EFB\u52A1\u6570 ${before.total}\u2192${r.total}`);
+          if (bits.length) changedProjectDetail.push(`${r.name}\uFF1A${bits.join("\u3001")}`);
+        } else if (r.taskUpdatedAt && before.taskUpdatedAt && r.taskUpdatedAt !== before.taskUpdatedAt) {
+          changedProjectCount++;
+          changedProjectDetail.push(`${r.name}\uFF1A\u4EFB\u52A1\u5185\u5BB9\u6709\u66F4\u65B0\uFF08${before.taskUpdatedAt.slice(11, 16)} \u2192 ${r.taskUpdatedAt.slice(11, 16)}\uFF09`);
+        }
+      }
+      for (const k of prev.keys()) {
+        if (!items.some((x) => x.key === k)) changedProjectCount++;
+      }
+      lastLoadAt = now;
+    }
     const live = items.filter((r) => !r.isTest);
     const test = items.filter((r) => r.isTest);
     GROUPS = [
@@ -4369,8 +4422,12 @@
     ]));
     if (fp === lastFingerprint) return;
     lastFingerprint = fp;
-    if (open) renderProjects();
-    else renderStats();
+    if (!open) {
+      renderStats();
+      return;
+    }
+    if (view.kind === "tasks") renderTasks(view.proj);
+    else renderProjects();
   }
   async function loadTasks(key) {
     const p = byKey(key);
@@ -4381,13 +4438,21 @@
       p.tasks = rows.map((t) => ({
         key: t.key,
         title: t.title || t.key,
-        status: t.status === "done" ? "done" : t.status === "failed" || t.status === "cancelled" ? "blocked" : t.status === "blocked" ? "blocked" : t.status === "running" ? "doing" : t.status === "review" ? "review" : t.owner ? "doing" : t.unmet_deps > 0 ? "blocked" : "ready",
+        status: t.status === "done" ? "done" : t.status === "failed" || t.status === "cancelled" ? "blocked" : t.status === "blocked" ? "blocked" : t.status === "running" ? "doing" : t.status === "review" ? "review" : t.status === "blocked" ? "blocked" : t.ownerAlive && t.owner ? "doing" : t.unmet_deps > 0 ? "blocked" : "ready",
         raw: t.status,
         pri: typeof t.priority === "number" ? t.priority : 9,
         owner: t.owner ? String(t.owner).replace(/^session-/, "").slice(0, 12) : void 0,
+        ownerAlive: t.owner_alive === true,
+        ownerBeatMin: typeof t.owner_beat_min === "number" ? t.owner_beat_min : -1,
         depends: t.dep_keys ? String(t.dep_keys).split(", ").filter(Boolean) : [],
         desc: String(t.description || "").trim(),
-        nextAct: String(t.next_action || "").trim()
+        nextAct: String(t.next_action || "").trim(),
+        /* 合同（目标 / 验收标准）。为什么要它：
+           任务的标题和说明是**创建时写死的 —— 平台没有任何工具能改**
+           （project_task_update 只 SET status / next_action / lease / updated_at）。
+           所以范围延伸之后"名字对不上"是常态，**合同才是这件事现在的定义**。
+           面板以前完全没查 agent_task_contracts，等于把最该看的东西藏起来了。 */
+        contract: String(t.contract || "").trim()
       }));
       p.fromDb = true;
     } catch (e) {
@@ -4427,7 +4492,13 @@
     }
   }
   var lastFingerprint = "";
-  var libraryDirty = false;
+  var dirtyProjects = /* @__PURE__ */ new Set();
+  var archivedProjects = [];
+  var collecting = false;
+  var addedProjects = [];
+  var changedProjectCount = 0;
+  var changedProjectDetail = [];
+  var lastLoadAt = 0;
   var num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
   var totalOf = (p) => num(p.total);
   var doneOf = (p) => num(p.done);
@@ -4435,7 +4506,13 @@
   var doingOf = (p) => num(p.doing);
   var failedOf = (p) => num(p.failed);
   var reviewOf = (p) => num(p.review);
-  var inFlightOf = (p) => doingOf(p) + failedOf(p);
+  var heldOf = (p) => num(p.held);
+  var blockedOf = (p) => heldOf(p) + failedOf(p);
+  var liveDoingOf = (p) => {
+    if (typeof p.liveClaims === "number") return p.liveClaims;
+    return p.tasks.filter((t) => t.status === "doing" && t.ownerAlive).length;
+  };
+  var inFlightOf = (p) => liveDoingOf(p) + failedOf(p);
   var prog = (p) => ({ done: doneOf(p), total: totalOf(p) });
   function taskLabel(t) {
     if (t.status === "done") return { cls: "b-done", label: "\u5DF2\u5B8C\u6210", icon: "i-done" };
@@ -4447,9 +4524,36 @@
   function projState(p) {
     if (p.total === 0) return { cls: "b-idle", label: "\u672A\u62C6\u89E3", icon: "i-tasks" };
     if (p.done === p.total) return { cls: "b-done", label: "\u5DF2\u5B8C\u6210", icon: "i-done" };
-    if (doingOf(p) > 0 || reviewOf(p) > 0) return { cls: "b-doing", label: "\u8FDB\u884C\u4E2D", icon: "i-doing" };
+    const working = num(p.liveTasks) > 0 || isLive(p) || liveDoingOf(p) > 0;
+    if (working || reviewOf(p) > 0) {
+      return { cls: "b-doing", label: "\u8FDB\u884C\u4E2D", icon: "i-doing" };
+    }
     if (readyOf(p) > 0) return { cls: "b-ready", label: "\u5F85\u5F00\u59CB", icon: "i-ready" };
     return { cls: "b-idle", label: "\u7B49\u5F85\u4E2D", icon: "i-wait" };
+  }
+  var ACTIVITY_LIVE_MIN = 60;
+  var isLive = (p) => {
+    if (typeof p.lastWorkMin === "number" && p.lastWorkMin >= 0) {
+      return p.lastWorkMin <= ACTIVITY_LIVE_MIN;
+    }
+    return p.tasks.some((t) => t.ownerAlive === true);
+  };
+  function stallNote(p) {
+    const stalled = num(p.stalledTasks);
+    const overdue = num(p.overdueEta);
+    if (!stalled && !overdue) return "";
+    const bits = [];
+    if (overdue) bits.push(`${overdue} \u4E2A\u903E\u671F\u6CA1\u4EA4`);
+    if (stalled) bits.push(`${stalled} \u4E2A\u5360\u7740\u6CA1\u63A8\u8FDB`);
+    return `<span class="meta-warn" title="\u6709\u4EBA\u5360\u7740\u8FD9\u4E9B\u4EFB\u52A1\uFF0C\u4F46\u4E00\u5C0F\u65F6\u4EE5\u4E0A\u6CA1\u6709\u68C0\u67E5\u70B9\u6216\u4EA7\u51FA\u3002${overdue ? " \u5176\u4E2D\u4E00\u4E9B\u662F\u4F1A\u8BDD\u81EA\u5DF1\u58F0\u660E\u8FC7 ETA\u3001\u73B0\u5728\u8FC7\u4E86\u3002" : ""}\u8FD9\u4E0D\u662F\u5931\u8D25\uFF0C\u662F"\u8BE5\u95EE\u4E00\u53E5\u4E86"\u3002">\u26A0 ${bits.join(" \xB7 ")}</span>`;
+  }
+  function activityText(min) {
+    if (min === void 0 || min < 0) return "";
+    if (min < 3) return "\u521A\u521A\u52A8\u8FC7";
+    if (min < 60) return `${min} \u5206\u949F\u524D\u52A8\u8FC7`;
+    const h = Math.floor(min / 60);
+    if (h < 48) return `${h} \u5C0F\u65F6\u524D\u52A8\u8FC7`;
+    return `${Math.floor(h / 24)} \u5929\u524D\u52A8\u8FC7`;
   }
   function unmetDeps(p, t) {
     if (!t.depends?.length) return [];
@@ -4462,14 +4566,24 @@
   function statusLine(p, t) {
     const base2 = taskLabel(t).label;
     const unmet = unmetDeps(p, t);
+    const stale = t.owner && t.ownerAlive === false;
+    const staleNote = stale ? ` \xB7 \u88AB ${t.owner} \u5360\u7740\uFF0C${beatText(t.ownerBeatMin)}\u6CA1\u52A8` : "";
     if (t.status === "done") return `${base2}${t.owner ? ` \xB7 ${t.owner}` : ""}`;
     if (t.status === "doing") return `${base2}${t.owner ? ` \xB7 \u5DF2\u88AB ${t.owner} \u9886\u8D70` : ""}`;
     if (t.status === "blocked") {
-      if (unmet.length) return `${base2} \xB7 \u5361\u5728 ${unmet.join("\u3001")}`;
-      return `${base2} \xB7 \u5E93\u91CC\u6807\u4E86 blocked${t.depends?.length ? `\uFF08\u524D\u7F6E ${t.depends.join("\u3001")} \u90FD\u5DF2\u5B8C\u6210\uFF09` : ""}`;
+      if (unmet.length) return `${base2} \xB7 \u5361\u5728 ${unmet.join("\u3001")}${staleNote}`;
+      return `${base2} \xB7 \u5E93\u91CC\u539F\u59CB\u72B6\u6001\uFF1Ablocked${t.depends?.length ? `\uFF08\u524D\u7F6E ${t.depends.join("\u3001")} \u90FD\u5DF2\u5B8C\u6210\uFF09` : ""}${staleNote}`;
     }
-    if (t.depends?.length) return `${base2} \xB7 \u524D\u7F6E\u5DF2\u5C31\u7EEA${t.owner ? `\uFF0C\u5DF2\u88AB ${t.owner} \u9886\u8D70` : "\uFF0C\u8FD8\u6CA1\u4EBA\u9886"}`;
+    if (t.depends?.length) return `${base2} \xB7 \u524D\u7F6E\u5DF2\u5C31\u7EEA${t.owner ? `\uFF0C${stale ? `\u88AB ${t.owner} \u5360\u7740` : `\u5DF2\u88AB ${t.owner} \u9886\u8D70`}` : "\uFF0C\u8FD8\u6CA1\u4EBA\u9886"}`;
+    if (stale) return `${base2} \xB7 \u8FD8\u6CA1\u4EBA\u9886\uFF08${t.owner} \u5360\u8FC7\u4F46\u5DF2 ${beatText(t.ownerBeatMin)}\u6CA1\u52A8\uFF09`;
     return `${base2} \xB7 \u8FD8\u6CA1\u4EBA\u9886`;
+  }
+  function beatText(min) {
+    if (min === void 0 || min < 0) return "\u5F88\u4E45";
+    if (min < 60) return `${min} \u5206\u949F`;
+    const h = Math.floor(min / 60);
+    if (h < 48) return `${h} \u5C0F\u65F6`;
+    return `${Math.floor(h / 24)} \u5929`;
   }
   function projBlock(p, t) {
     const info = projInfo(p);
@@ -4482,6 +4596,22 @@
       body2.push(`\u4EFB\u52A1\uFF1A${t.title}`);
       body2.push(`\u72B6\u6001\uFF1A${statusLine(p, t)}`);
       body2.push(`\u4F9D\u8D56\uFF1A${t.depends?.length ? t.depends.join("\u3001") : "\u65E0"}`);
+      if (t.contract) {
+        const c = parseContract(t.contract);
+        if (c.goal || c.acceptance.length) {
+          body2.push("");
+          body2.push("\u5408\u540C\uFF08\u8FD9\u4EF6\u4E8B\u73B0\u5728\u7684\u8981\u6C42 \u2014\u2014 \u4EFB\u52A1\u540D\u5B57\u53EA\u662F\u6807\u7B7E\uFF0C\u8303\u56F4\u4EE5\u8FD9\u91CC\u4E3A\u51C6\uFF09\uFF1A");
+          if (c.goal) body2.push(`  \u76EE\u6807\uFF1A${c.goal}`);
+          if (c.acceptance.length) {
+            body2.push("  \u9A8C\u6536\u6807\u51C6\uFF1A");
+            for (const a of c.acceptance) body2.push(`    \xB7 ${a}`);
+          }
+          if (c.constraints.length) {
+            body2.push("  \u7EA6\u675F\uFF1A");
+            for (const x of c.constraints) body2.push(`    \xB7 ${x}`);
+          }
+        }
+      }
       body2.push("");
       if (t.desc) {
         body2.push("\u63A5\u7EED\u8BF4\u660E\uFF08\u5E93\u91CC\u539F\u59CB\u8BB0\u5F55\uFF0C\u542B\u522B\u4EBA\u8E29\u8FC7\u7684\u5751\uFF09\uFF1A");
@@ -4510,6 +4640,10 @@
           body2.push("\u6CE8\u610F\uFF1A\u5E93\u91CC\u6807\u4E86 blocked\uFF0C\u4F46**\u6CA1\u6709\u672A\u5B8C\u6210\u7684\u524D\u7F6E** \u2014\u2014 \u8BF4\u660E\u5361\u7684\u662F\u5916\u90E8\u539F\u56E0\uFF08\u7B49\u4EBA/\u7B49\u8D44\u8D28/\u7B49\u51B3\u5B9A\uFF09\u3002");
           body2.push('  \u522B\u81EA\u5DF1\u60F3\u529E\u6CD5\u7ED5\u8FC7\u53BB\uFF0C\u5148\u628A"\u5230\u5E95\u5728\u7B49\u8C01"\u95EE\u6E05\u695A\u518D\u52A8\u624B\u3002');
         }
+        body2.push("");
+        body2.push("\u26A0 \u4E0A\u9762\u7684\u300C\u63A5\u7EED\u8BF4\u660E\u300D\u662F**\u5F53\u65F6\u90A3\u4E2A\u4F1A\u8BDD\u5199\u4E0B\u7684\u73B0\u573A\u8BB0\u5F55**\uFF0C\u53EF\u80FD\u5939\u7740\u5B83\u5F53\u65F6\u7684\u53D8\u901A\u529E\u6CD5\u3002");
+        body2.push("  \u90A3\u4E9B\u529E\u6CD5\u53CD\u6620\u7684\u662F**\u5F53\u65F6\u7684\u5E93**\uFF0C\u5DE5\u5177\u548C\u884C\u4E3A\u540E\u6765\u53D8\u8FC7 \u2014\u2014 \u7167\u6284\u524D\u5148\u7528 project_overview \u6838\u4E00\u904D\uFF0C");
+        body2.push("  \u6216\u8005\u76F4\u63A5\u95EE\u7528\u6237\uFF1B\u4E0D\u8981\u56E0\u4E3A\u4E00\u53E5\u8BDD\u5C31\u7ED5\u8FC7\u73B0\u5728\u7684\u524D\u7F6E/\u6743\u9650\u89C4\u5219\u3002");
         const dangling = danglingDeps(p, t);
         if (dangling.length) {
           body2.push(`\u53E6\u5916\uFF1A\u524D\u7F6E\u300C${dangling.join("\u3001")}\u300D\u5728\u5F53\u524D\u5E93\u91CC\u67E5\u4E0D\u5230\uFF08\u53EF\u80FD\u5DF2\u5220/\u6539\u540D/\u5C5E\u4E8E\u522B\u7684\u9879\u76EE\uFF09\u2014\u2014 \u5148\u95EE\u6E05\u695A\uFF0C\u522B\u731C\u3002`);
@@ -4518,8 +4652,12 @@
       if (isDone) {
         body2.push("");
         body2.push("\u8FD9\u4E2A\u4EFB\u52A1\u5DF2\u7ECF\u6807\u8BB0\u5B8C\u6210\u4E86\u3002\u5982\u679C\u4F60\u662F\u60F3**\u4E86\u89E3\u5B83\u505A\u4E86\u4EC0\u4E48**\uFF0C\u8BFB\u4E0A\u9762\u8FD9\u4E9B\u5C31\u591F\u4E86\uFF1B");
-        body2.push("\u5982\u679C\u4F60\u89C9\u5F97\u8FD8\u5F97\u7EE7\u7EED\u505A\uFF0C\u5148\u8BF4\u6E05\u695A\u539F\u56E0\uFF0C\u522B\u76F4\u63A5\u628A\u72B6\u6001\u6539\u56DE\u53BB\u91CD\u5F00\u3002");
-        body2.push(`\u60F3\u62FF\u5B8C\u6574\u4E0A\u4E0B\u6587\uFF1Aproject_task_dispatch(project="${p.key}", task_key="${t.key}") \u62FF id \u2192 project_context_pack\u3002`);
+        body2.push("\u5982\u679C\u4F60\u89C9\u5F97\u8FD8\u5F97\u7EE7\u7EED\u505A\uFF0C**\u5148\u7528\u8FD9\u6761\u8DEF\u628A\u5B83\u9000\u56DE\u961F\u5217**\uFF08\u522B\u76F4\u63A5\u6539\u72B6\u6001 \u2014\u2014 \u7EC8\u6001\u4E0D\u80FD\u76F4\u63A5\u6539\uFF09\uFF1A");
+        body2.push(`  project_task_reopen(task_id=<\u4E0B\u9762\u90A3\u4E2A id>, session_id=<\u4F60\u7684 id>, reason="<\u4E3A\u4EC0\u4E48\u8981\u91CD\u5F00>")`);
+        body2.push("  \u5B83\u628A\u4EFB\u52A1\u9000\u56DE pending \u5E76\u7559 task_reopened \u4E8B\u4EF6\uFF08reason \u5FC5\u586B\uFF0C\u5E73\u53F0\u4E0D\u7559\u6084\u6084\u6539\u7EC8\u6001\u7684\u53E3\u5B50\uFF09\uFF1B");
+        body2.push("  \u4E4B\u540E\u5C31\u80FD\u6B63\u5E38\u8D70\uFF1A\u9886 \u2192 \u8865\u68C0\u67E5\u70B9 \u2192 \u518D\u6807 done\u3002");
+        body2.push(`\u60F3\u62FF\u5B8C\u6574\u4E0A\u4E0B\u6587\uFF1Aproject_overview(project="${p.key}") \u770B\u5B83\u8FD9\u4E00\u9879`);
+        body2.push("  \uFF08\u5DF2 done \u7684\u4EFB\u52A1\u4E0D\u80FD\u518D dispatch \u2014\u2014 \u4F1A\u56DE already done\uFF09\uFF1B\u4E5F\u53EF\u4EE5\u76F4\u63A5\u8BFB\u5B83\u5386\u53F2\u4E0A\u7684\u68C0\u67E5\u70B9\u3002");
         return body2.join("\n");
       }
       body2.push("");
@@ -4531,11 +4669,25 @@
       body2.push("     \u9A8C\u6536\u6807\u51C6\u4EE5\u91CC\u9762\u7684 Objective / Acceptance \u4E3A\u51C6\uFF1B\u8FD9\u4E24\u4E2A\u662F\u7A7A\u7684\u5C31\u81EA\u5DF1\u5199\u51FA\u9A8C\u6536\u6807\u51C6\u5E76\u56DE\u5199\u3002");
       body2.push(...mapRequirement(p, "3"));
       body2.push("  4) \u5E72\u6D3B\u3002**\u6536\u5C3E\u987A\u5E8F\u4E5F\u4E0D\u80FD\u6362**\uFF1A");
+      body2.push("     \u26A0 \u5199\u5408\u540C\u65F6\uFF0C\u9A8C\u6536\u6807\u51C6\u5C3D\u91CF\u5199\u6210**\u53EF\u5224\u5B9A\u7684\u5224\u636E** \u2014\u2014 \u5BF9\u8D26\u65F6\u4F1A\u88AB\u81EA\u52A8\u6267\u884C\u5E76\u53D6\u8BC1\uFF1A");
+      body2.push("       file_exists:<\u8DEF\u5F84>              \u5B58\u5728\u3001\u662F\u6587\u4EF6\u3001\u975E\u7A7A");
+      body2.push("       no_placeholders:<\u8DEF\u5F84>          \u6CA1\u6709 TODO/TBD/FIXME/[INSERT]/\u5F85\u5B9E\u73B0");
+      body2.push("       grep_absent:<\u8DEF\u5F84>::<\u6587\u672C>      \u641C\u4E0D\u5230\u90A3\u6BB5\u6587\u672C");
+      body2.push("       sha256:<\u8DEF\u5F84>::<\u6458\u8981>           \u5185\u5BB9\u6307\u7EB9\u4E00\u81F4");
+      body2.push("       tests_pass:<\u6D4B\u8BD5\u547D\u4EE4>           \u6D4B\u8BD5\u901A\u8FC7\uFF08\u9700\u4F60\u5B9E\u9645\u8DD1\uFF0C\u7ED3\u679C\u4F5C\u4E3A evidence \u4F20\uFF09");
+      body2.push("       \u81EA\u7136\u8BED\u8A00\u7167\u65E7\u53EF\u4EE5\u5199 \u2014\u2014 \u4E0D\u4F1A\u88AB\u62D2\uFF0C\u53EA\u662F\u4E0D\u4F1A\u88AB\u81EA\u52A8\u9A8C\uFF08\u7531\u590D\u6838\u4F1A\u8BDD\u8BFB\uFF09");
       body2.push("     a. project_checkpoint(project=\u2026, task_id=<id>, state={completed/not_done/pitfalls/blockers/next_action})");
       body2.push('     b. project_artifact_publish(project=\u2026, task_id=<id>, kind="doc", path="<\u771F\u5B9E\u5B58\u5728\u7684\u6587\u4EF6\u7684\u7EDD\u5BF9\u8DEF\u5F84>", revision="<7\u4F4D\u4EE5\u4E0Agit\u77EDSHA>")');
       body2.push("        \u26A0 \u5FC5\u987B\u662F\u4F60\u81EA\u5DF1\u540D\u4E0B\u7684\u4EFB\u52A1\u624D\u80FD\u53D1\uFF1B\u8DEF\u5F84\u5FC5\u987B\u843D\u5728\u9879\u76EE\u76EE\u5F55\u5185\u4E14\u6587\u4EF6\u771F\u7684\u5B58\u5728\u3002");
-      body2.push('     c. project_task_update(project=\u2026, task_id=<id>, status="done", next_action="\u4E0B\u4E00\u6B65")');
-      body2.push("     d. \u4EE3\u7801\u5730\u56FE\u8981\u66F4\u65B0\u7684\u8BDD\uFF0C\u653E\u5728**\u6700\u540E**\uFF08\u5B83\u8981\u6C42\u4F60\u624B\u91CC\u8FD8\u6709 running \u4EFB\u52A1\uFF0C\u5148\u6807 done \u5C31\u5199\u4E0D\u8FDB\u53BB\u4E86\uFF09");
+      body2.push("     c. **\u6807 done \u4E4B\u524D\u5148\u8DD1\u4E00\u904D\u9A8C\u6536\u5224\u636E**\uFF1Aproject_preflight(project=\u2026, task_id=<id>)");
+      body2.push("        \u5B83\u6267\u884C\u4F60\u5408\u540C\u91CC\u7684\u53EF\u5224\u5B9A\u5224\u636E\uFF08file_exists: / tests_pass: / grep_absent: / sha256: \u2026\uFF09\uFF0C");
+      body2.push("        \u544A\u8BC9\u4F60\u54EA\u6761\u8FD8\u6CA1\u8FC7 \u2014\u2014 \u5728**\u8FD8\u80FD\u6539**\u7684\u65F6\u5019\u770B\u5230\uFF0C\u800C\u4E0D\u662F\u6807\u5B8C\u88AB\u5224\u4E0D\u901A\u8FC7\u518D\u8FD4\u5DE5\u3002");
+      body2.push("        \u5199\u5408\u540C\u65F6\u5C3D\u91CF\u628A\u9A8C\u6536\u6807\u51C6\u5199\u6210\u5224\u636E\uFF08\u81EA\u7136\u8BED\u8A00\u7167\u65E7\u53EF\u4EE5\u5199\uFF0C\u53EA\u662F\u4E0D\u4F1A\u88AB\u81EA\u52A8\u9A8C\uFF09\uFF1A");
+      body2.push("          file_exists:<\u8DEF\u5F84> / no_placeholders:<\u8DEF\u5F84> / grep_absent:<\u8DEF\u5F84>::<\u6587\u672C> /");
+      body2.push("          sha256:<\u8DEF\u5F84>::<\u6458\u8981> / tests_pass:<\u547D\u4EE4> / endpoint_ok:<URL>");
+      body2.push('     d. project_task_update(project=\u2026, task_id=<id>, status="done", next_action="\u4E0B\u4E00\u6B65")');
+      body2.push("     e. \u4EE3\u7801\u5730\u56FE\u5EFA\u8BAE\u5728**\u6807 done \u4E4B\u524D**\u66F4\u65B0\uFF08\u90A3\u65F6\u8BED\u4E49\u6700\u6E05\u695A\uFF09\uFF1B");
+      body2.push("        \u4E07\u4E00\u5FD8\u4E86\u3001\u5DF2\u7ECF\u6807\u4E86 done \u4E5F\u6CA1\u5173\u7CFB \u2014\u2014 \u53EA\u8981\u4F60\u5728\u8FD9\u4E2A\u9879\u76EE\u91CC\u5E72\u8FC7\uFF08\u62E5\u6709\u4EFB\u52A1 / \u8FD1 7 \u5929\u6709\u68C0\u67E5\u70B9\uFF09\u5C31\u4ECD\u80FD\u5199\u3002");
       body2.push(...discipline());
       body2.push("  \u54EA\u4E9B\u8BE5\u4F60\u81EA\u5DF1\u5B9A\u3001\u54EA\u4E9B\u8BE5\u6765\u95EE\u6211\uFF0C\u4F60\u81EA\u5DF1\u5224\u65AD \u2014\u2014 \u4F46\u522B\u8BA9\u4E0B\u4E2A\u4F1A\u8BDD\u628A\u540C\u6837\u7684\u4E8B\u518D\u95EE\u4E00\u904D\u3002");
       return body2.join("\n");
@@ -4551,7 +4703,6 @@
     if (p.failed) pbits.push(`${p.failed} \u4E2A\u5361\u4F4F/\u5931\u8D25`);
     body.push(`\u8FDB\u5EA6\uFF1A${pbits.join(" \xB7 ")}`);
     body.push("");
-    const shown = [];
     const group = (title, list) => {
       if (!list.length) return;
       body.push(`${title}\uFF1A`);
@@ -4559,7 +4710,6 @@
         const dep = x.depends?.length ? `\uFF08\u7B49 ${x.depends.join("\u3001")}\uFF09` : "";
         const who = x.owner ? `\uFF08${x.owner}\uFF09` : "";
         body.push(`  \xB7 ${x.key} \u2014\u2014 ${x.title}${dep}${who}`);
-        shown.push(x.key);
       }
     };
     group("\u8FD8\u6CA1\u4EBA\u9886", p.tasks.filter((x) => x.status === "ready"));
@@ -4572,13 +4722,13 @@
       body.push("\u5DF2\u5B8C\u6210\uFF1A");
       for (const x of doneAll.slice(0, DONE_SHOW)) {
         body.push(`  \xB7 ${x.key} \u2014\u2014 ${x.title}`);
-        shown.push(x.key);
       }
       if (doneAll.length > DONE_SHOW) {
         body.push(`  \uFF08\u53E6\u6709 ${doneAll.length - DONE_SHOW} \u4E2A\u5DF2\u5B8C\u6210\u6CA1\u5217\u51FA\u6765\uFF0C\u9700\u8981\u65F6\u7528 project_overview \u67E5\uFF09`);
       }
     }
-    const rest = p.tasks.filter((x) => !shown.includes(x.key));
+    const known = /* @__PURE__ */ new Set(["ready", "doing", "review", "blocked", "done"]);
+    const rest = p.tasks.filter((x) => !known.has(x.status));
     if (rest.length) {
       body.push(`\u5176\u4ED6\u72B6\u6001 ${rest.length} \u4E2A\uFF1A${rest.map((x) => `${x.key}\uFF08${x.status}\uFF09`).join("\u3001")}`);
     }
@@ -4597,6 +4747,26 @@
     const root = (p.root || "").trim();
     return root ? [`\u4ED3\u5E93\uFF1A${root}`] : ["\u4ED3\u5E93\uFF1A\u5E93\u91CC\u6CA1\u767B\u8BB0\u8FD9\u4E2A\u9879\u76EE\u7684\u4EE3\u7801\u76EE\u5F55\uFF08\u5148\u7528 project_for_path \u786E\u8BA4\u5DE5\u4F5C\u76EE\u5F55\uFF09"];
   }
+  function parseContract(raw) {
+    const empty = { goal: "", acceptance: [], constraints: [] };
+    try {
+      const o = JSON.parse(raw);
+      if (!o || typeof o !== "object") return empty;
+      const asList = (v) => {
+        if (v === null || v === void 0) return [];
+        if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+        const s = String(v).trim();
+        return s ? [s] : [];
+      };
+      return {
+        goal: String(o.goal || o.objective || "").trim(),
+        acceptance: asList(o.acceptance),
+        constraints: asList(o.constraints)
+      };
+    } catch {
+      return empty;
+    }
+  }
   function projInfo(p) {
     const scope = (p.scope || "").trim();
     return scope ? [`\u9879\u76EE\uFF1A${scope}`, ...repoLine(p)] : [`\u9879\u76EE\uFF1A\u5E93\u91CC\u6CA1\u5199\u8FD9\u4E2A\u9879\u76EE\u7684 scope \u2014\u2014 \u5148\u7528 project_overview(project="${p.key}") \u641E\u6E05\u695A\u5B83\u662F\u4EC0\u4E48\u518D\u52A8\u624B\u3002`, ...repoLine(p)];
@@ -4611,10 +4781,28 @@
       "",
       "  \u51E0\u6761\u7EAA\u5F8B\uFF1A",
       "    \xB7 \u4EFB\u4F55\u5DE5\u5177\u62A5\u9519\uFF0C\u628A**\u62A5\u9519\u539F\u6587**\u7167\u8D34\u56DE\u6765\uFF08\u542B\u5DE5\u5177\u540D\u548C\u5B8C\u6574 message\uFF09\uFF0C\u4E0D\u8981\u81EA\u5DF1\u6539\u8FF0\u3001\u4E0D\u8981\u5047\u88C5\u6210\u529F\u3002",
-      "    \xB7 \u987A\u5E8F\u6700\u5173\u952E\uFF1A**\u5148\u9886\u4EFB\u52A1 \u2192 \u52A8\u624B \u2192 \u68C0\u67E5\u70B9/\u4EA7\u51FA \u2192 \u6700\u540E\u624D\u6807 done \u2192 \u518D\u66F4\u65B0\u4EE3\u7801\u5730\u56FE**\u3002",
-      "      \u5148\u6807 done \u4F1A\u5BFC\u81F4\uFF1A\u53D1\u4E0D\u51FA\u4EA7\u51FA\u3001\u5199\u4E0D\u4E86\u4EE3\u7801\u5730\u56FE\uFF08\u90A3\u4E24\u4EF6\u4E8B\u90FD\u8981\u6C42\u4EFB\u52A1\u8FD8\u5728\u4F60\u540D\u4E0B/\u662F\u6D3B\u8DC3\u72B6\u6001\uFF09\u3002",
+      "    \xB7 \u987A\u5E8F\u6700\u5173\u952E\uFF1A**\u5148\u9886\u4EFB\u52A1 \u2192 \u52A8\u624B \u2192 \u66F4\u65B0\u4EE3\u7801\u5730\u56FE \u2192 \u68C0\u67E5\u70B9/\u4EA7\u51FA \u2192 \u6700\u540E\u624D\u6807 done**\u3002",
+      "      \u5148\u6807 done \u4F1A\u5BFC\u81F4\uFF1A**\u53D1\u4E0D\u51FA\u4EA7\u51FA**\uFF08artifact_publish \u8981\u6C42\u4EFB\u52A1\u5728\u4F60\u540D\u4E0B\uFF0C\u4E14\u5B83\u5FC5\u987B\u662F\u6D3B\u8DC3\u4EFB\u52A1\uFF09\u3002",
+      "      \uFF08\u4EE3\u7801\u5730\u56FE\u662F\u53E6\u4E00\u56DE\u4E8B \u2014\u2014 \u6807\u4E86 done \u4E5F\u8FD8\u80FD\u8865\u5199\uFF0C\u89C1\u4E0A\u9762\u7B2C 5 \u6761\u3002\uFF09",
       "    \xB7 \u6807 done \u53EA\u662F\u6807\u72B6\u6001\u3002\u7B97\u4E0D\u7B97\u771F\u5B8C\u6210\u7531**\u72EC\u7ACB\u5BF9\u8D26**\u8BF4\u4E86\u7B97\uFF0C\u800C\u4E14\u5BF9\u8D26\u4EBA\u4E0D\u80FD\u662F\u4EFB\u52A1\u6240\u6709\u8005\uFF1A",
       '      project_reconcile(project=\u2026, task_id=<id>, status="verified", reviewer_session_id=<\u53E6\u4E00\u4E2A\u4F1A\u8BDD>)\u3002',
+      "    \xB7 **\u6807 done \u4E4B\u524D\u5148\u8DD1\u4E00\u904D\u9A8C\u6536\u5224\u636E**\uFF1Aproject_preflight(project=\u2026, task_id=<id>)",
+      "      \u5B83\u6267\u884C\u5408\u540C\u91CC\u7684\u53EF\u5224\u5B9A\u5224\u636E\uFF08file_exists: / tests_pass: / grep_absent: \u2026\uFF09\uFF0C",
+      "      \u544A\u8BC9\u4F60\u54EA\u6761\u8FD8\u6CA1\u8FC7 \u2014\u2014 \u5728**\u8FD8\u80FD\u6539**\u7684\u65F6\u5019\u770B\u5230\uFF0C\u800C\u4E0D\u662F\u6807\u5B8C\u88AB\u5224\u4E0D\u901A\u8FC7\u518D\u8FD4\u5DE5\u3002",
+      "      \u5199\u5408\u540C\u65F6\u5C3D\u91CF\u628A\u9A8C\u6536\u6807\u51C6\u5199\u6210\u5224\u636E\uFF08\u81EA\u7136\u8BED\u8A00\u7167\u65E7\u53EF\u4EE5\u5199\uFF0C\u53EA\u662F\u4E0D\u4F1A\u88AB\u81EA\u52A8\u9A8C\uFF09\uFF1A",
+      "        file_exists:<\u8DEF\u5F84> / no_placeholders:<\u8DEF\u5F84> / grep_absent:<\u8DEF\u5F84>::<\u6587\u672C> /",
+      "        sha256:<\u8DEF\u5F84>::<\u6458\u8981> / tests_pass:<\u547D\u4EE4> / endpoint_ok:<URL>",
+      "    \xB7 \u78B0\u5230**\u5DF2\u7ECF done \u7684\u4EFB\u52A1**\u8981\u63A5\u7740\u52A8\u5B83\uFF08\u8865\u8BB0\u3001\u8FD4\u5DE5\u3001\u7EE7\u7EED\u505A\uFF09\uFF1A\u5148\u7528\u8FD9\u6761\u8DEF\u9000\u56DE\u961F\u5217\uFF0C",
+      "      \u4E0D\u8981\u8BD5\u56FE\u76F4\u63A5\u6539\u72B6\u6001 \u2014\u2014 done\u2192running \u4F1A\u88AB\u62D2\uFF0C\u7406\u7531\u662F Self-approval",
+      "      \uFF08\u5B9E\u6D4B\u6709\u4EFB\u52A1\u88AB\u8BA4\u9886 4 \u6B21\u3001\u6807 done 3 \u6B21\uFF0C\u5951\u7EA6/\u5BF9\u8D26/\u4EA7\u51FA\u5168\u6210\u4E86\u53EF\u88AB\u9759\u9ED8\u63A8\u7FFB\u7684\u6B8B\u7559\uFF09\uFF1A",
+      '        project_task_reopen(task_id=<id>, session_id=<\u4F60>, reason="<\u4E3A\u4EC0\u4E48\u8981\u91CD\u5F00>")',
+      "      \u5B83\u628A\u4EFB\u52A1\u9000\u56DE pending \u5E76\u7559 task_reopened \u4E8B\u4EF6\uFF08reason \u5FC5\u586B\uFF09\uFF1B\u4E4B\u540E\u5C31\u80FD\u6B63\u5E38\u8D70\uFF1A\u9886 \u2192 \u8865\u8BB0 \u2192 \u518D\u6807 done\u3002",
+      "    \xB7 **\u611F\u89C9\u5FEB\u6CA1\u4E0A\u4E0B\u6587\u4E86\u3001\u6216\u8981\u88AB\u4E2D\u65AD\u65F6 \u2014\u2014 \u5148\u628A\u73B0\u573A\u51BB\u4F4F\u518D\u8D70**\uFF0C\u522B\u786C\u6491\u5230\u88AB\u622A\u65AD\uFF1A",
+      '      project_handoff(project=\u2026, task_id=<id>, from_session_id=<\u4F60>, kind="mid-cycle",',
+      '        summary="\u4E3A\u4EC0\u4E48\u4E2D\u65AD", state={current_edit:[\u2026], in_flight_reasoning:[\u2026],',
+      "        decisions_made:[\u2026], decisions_deferred:[\u2026]})",
+      "      \u5176\u4E2D in_flight_reasoning\uFF08\u8111\u5B50\u91CC\u8FD8\u6CA1\u5199\u4E0B\u6765\u7684\u63A8\u7406\uFF09**\u6700\u5BB9\u6613\u4E22**\uFF1A",
+      "      \u4EE3\u7801\u91CC\u6839\u672C\u6CA1\u6709\u5B83\uFF0C\u4F1A\u8BDD\u4E00\u65AD\u5C31\u6C38\u4E45\u6CA1\u4E86\u3002\u56DB\u5C0F\u8282\u81F3\u5C11\u5199\u4E00\u4E2A\u3002",
       "    \xB7 context_pack \u62A5\u9519\u6216\u5185\u5BB9\u88AB\u622A\u65AD\uFF08\u51FA\u73B0 [context truncated \u2026]\uFF09\u65F6\uFF1A\u6539\u7528 project_overview +",
       "      project_code_map \u5206\u6279\u8BFB\uFF0C\u522B\u51ED\u5370\u8C61\u5F00\u5DE5\u3002"
     ];
@@ -4627,21 +4815,35 @@
         num2 + ") \u8FD9\u662F\u8D44\u6599/\u65B9\u6CD5\u7C7B\u9879\u76EE\uFF0C\u4E0D\u7528\u8BFB\u4EE3\u7801\u5730\u56FE\uFF1B\u8981\u68B3\u7406\u7684\u8BDD\u628A\u8D44\u6599\u7ED3\u6784\u548C\u6765\u6E90\u5199\u8FDB\u77E5\u8BC6\u56FE\u8C31\u3002"
       ];
     }
-    const line = num2 + ") \u8BFB\u77E5\u8BC6\u56FE\u8C31\uFF08\u4EE3\u7801\u5730\u56FE\uFF09\u2014\u2014 \u5F04\u6E05\u6A21\u5757\u5212\u5206\u3001\u5404\u81EA\u804C\u8D23\u3001\u4EE3\u7801\u5728\u54EA\u4E2A\u6587\u4EF6\u3001\u6A21\u5757\u4E4B\u95F4\u600E\u4E48\u8C03\u3002";
+    const line = "  " + num2 + ") \u8BFB\u77E5\u8BC6\u56FE\u8C31\uFF08\u4EE3\u7801\u5730\u56FE\uFF09\u2014\u2014 \u5F04\u6E05\u6A21\u5757\u5212\u5206\u3001\u5404\u81EA\u804C\u8D23\u3001\u4EE3\u7801\u5728\u54EA\u4E2A\u6587\u4EF6\u3001\u6A21\u5757\u4E4B\u95F4\u600E\u4E48\u8C03\u3002";
     if (nodes > 0) {
       return [
         line,
         `     \u5DF2\u8BB0\u5F55 ${nodes} \u4E2A\u6A21\u5757 / ${edges} \u6761\u8C03\u7528\u5173\u7CFB\uFF1Bcontext_pack \u91CC\u5C31\u5E26\u7740\uFF0C`,
         `     \u4E5F\u53EF\u4EE5\u5355\u72EC project_code_map(project="${p.key}") \u53D6\u5B8C\u6574\u7248\u3002\u52A8\u624B\u524D\u5148\u770B\u5B83\uFF0C\u522B\u91CD\u8BFB\u5168\u4ED3\u5E93\u3002`,
         `     \u6539\u4E86\u4EE3\u7801\u7684\u5F62\u72B6\u5C31\u7528 project_code_map_write \u66F4\u65B0\u56DE\u53BB\uFF0C**\u8BB0\u5F97\u5E26 revision**\uFF087 \u4F4D\u4EE5\u4E0A git \u77ED SHA\uFF09\uFF0C`,
-        `     \u4E0D\u4F20\u7684\u8BDD\u4E0B\u4E2A\u4F1A\u8BDD\u770B\u5230\u7684\u4F1A\u662F unversioned\uFF08\u4F1A\u6253 WARNING\uFF09\uFF1Breplace=True \u4F1A\u88AB\u62D2\uFF0C\u53EA\u80FD\u5408\u5E76\u3002`
+        `     \u4E0D\u4F20\u7684\u8BDD\u4E0B\u4E2A\u4F1A\u8BDD\u770B\u5230\u7684\u4F1A\u662F unversioned\uFF08\u4F1A\u6253 WARNING\uFF09\uFF1Breplace=True \u4F1A\u88AB\u62D2\uFF0C\u53EA\u80FD\u5408\u5E76\u3002`,
+        `     \u26A0 \u8282\u70B9\u5B57\u6BB5\uFF08\u90FD\u5B9E\u6D4B\u8FC7\uFF0C\u7167\u8FD9\u4E2A\u5199\u4E0D\u4F1A\u5361\uFF09\uFF1A`,
+        `       \xB7 **kind \u662F\u56FA\u5B9A\u679A\u4E3E\uFF0C\u5199\u9519\u76F4\u63A5\u62A5\u9519**\uFF1Afrontend | backend | database | cloud | security | messagebus | external`,
+        `       \xB7 status \u4E5F\u662F\u679A\u4E3E\uFF08\u9ED8\u8BA4 planned\uFF09\uFF1Aplanned | wip | done | broken | retired`,
+        `       \xB7 \u6700\u5C0F\u5F62\u6001\uFF08node_key + kind + label \u662F\u5FC5\u586B\uFF0C\u5176\u4F59\u53EF\u7701\uFF09\uFF1A`,
+        `         nodes=[{node_key:"core", kind:"backend", label:"\u6838\u5FC3", responsibility:"\u5E72\u4EC0\u4E48", paths:["src/xxx.py"]}]`,
+        `         edges=[{from_key:"core", to_key:"store", label:"\u8C03\u7528"}]`,
+        `       \xB7 paths \u4F20\u5B57\u7B26\u4E32\u6570\u7EC4\u5373\u53EF\uFF1Bnode_key \u53EA\u80FD\u5B57\u6BCD\u5F00\u5934 + \u5B57\u6BCD\u6570\u5B57-_`
       ];
     }
     return [
       line,
       `     \u4F46\u8FD9\u4E2A\u9879\u76EE\u73B0\u5728**\u8FD8\u6CA1\u6709**\u4EE3\u7801\u5730\u56FE\uFF080 \u4E2A\u6A21\u5757\uFF09\u2014\u2014 \u8BFB\u4E0D\u5230\u4E1C\u897F\u3002`,
       `     \u6240\u4EE5\u987A\u624B\u505A\u4E00\u4EF6\u4E8B\uFF1A\u8BFB\u4E00\u904D\u4EE3\u7801\u540E\u7528 project_code_map_write \u628A\u5730\u56FE\u5EFA\u8D77\u6765`,
-      `     \uFF08\u6A21\u5757 / \u804C\u8D23 / \u6587\u4EF6\u8DEF\u5F84 / \u8C03\u7528\u5173\u7CFB + revision\uFF09\uFF0C\u4E0B\u4E2A\u4F1A\u8BDD\u624D\u4E0D\u7528\u91CD\u8BFB\u5168\u4ED3\u5E93\u3002`
+      `     \uFF08\u6A21\u5757 / \u804C\u8D23 / \u6587\u4EF6\u8DEF\u5F84 / \u8C03\u7528\u5173\u7CFB + revision\uFF09\uFF0C\u4E0B\u4E2A\u4F1A\u8BDD\u624D\u4E0D\u7528\u91CD\u8BFB\u5168\u4ED3\u5E93\u3002`,
+      `     \u26A0 \u4E09\u4E2A\u5BB9\u6613\u5361\u4F4F\u7684\u70B9\uFF08\u90FD\u5B9E\u6D4B\u8FC7\uFF09\uFF1A`,
+      `       \xB7 **kind \u662F\u56FA\u5B9A\u679A\u4E3E\uFF0C\u5199\u9519\u76F4\u63A5\u62A5\u9519**\uFF1Afrontend | backend | database | cloud | security | messagebus | external`,
+      `         \uFF08\u5199 kind="module" \u4F1A\u88AB\u62D2\uFF1Amust be one of: backend, cloud, database, \u2026\uFF09`,
+      `       \xB7 status \u4E5F\u662F\u679A\u4E3E\uFF08\u9ED8\u8BA4 planned\uFF09\uFF1Aplanned | wip | done | broken | retired`,
+      `       \xB7 \u6700\u5C0F\u5F62\u6001\uFF08node_key + kind + label \u662F\u5FC5\u586B\uFF0C\u5176\u4F59\u53EF\u7701\uFF09\uFF1A`,
+      `         nodes=[{node_key:"core", kind:"backend", label:"\u6838\u5FC3", responsibility:"\u5E72\u4EC0\u4E48", paths:["src/xxx.py"]}]`,
+      `         edges=[{from_key:"core", to_key:"store", label:"\u8C03\u7528"}]`
     ];
   }
   function splitBlock(p) {
@@ -4663,10 +4865,12 @@
     body.push(`     \xB7 \u5148 project_session_register(project="${p.key}", provider="<\u4F60\u7684 provider>", model="<\u4F60\u7684 model>") \u767B\u8BB0\u81EA\u5DF1\uFF1B`);
     body.push('       \u6CA1\u767B\u8BB0\u7684\u8BDD\u540E\u9762\u6240\u6709\u5199\u64CD\u4F5C\u90FD\u4F1A\u56E0\u4E3A"\u4F1A\u8BDD\u4E0D\u5728\u8FD9\u4E2A\u9879\u76EE\u91CC"\u800C\u5931\u8D25\u3002');
     body.push("     \xB7 \u9879\u76EE\u8BA1\u5212\u6CA1\u9501 \u2192 \u76F4\u63A5\u7528 project_task_create(project=\u2026, task_key=\u2026, title=\u2026, description=\u2026, priority=\u2026)\u3002");
-    body.push('     \xB7 \u9879\u76EE\u8BA1\u5212\u5DF2\u9501\uFF08\u62A5 "initial plan is locked"\uFF09\u2192 \u53EA\u80FD\u63D0\u6848\uFF0C\u4E0D\u80FD\u76F4\u63A5\u5EFA\uFF1A');
+    body.push('     \xB7 \u9879\u76EE\u8BA1\u5212\u5DF2\u9501\uFF08\u62A5 "initial plan is locked"\uFF09\u2192 \u5148\u63D0\u6848\uFF0C\u8D70\u5B8C\u590D\u6838\u5C31\u4F1A\u89E3\u9501\uFF1A');
     body.push('       project_plan_propose(project=\u2026, reason=\u2026, changes=[{operation:"add_task", task_key:\u2026, title:\u2026, description:\u2026, priority:\u2026}])');
     body.push("       \u7136\u540E**\u8BF7\u7528\u6237\u6216\u53E6\u4E00\u4E2A\u4F1A\u8BDD**\u53BB\u5BA1\u6279\uFF08project_plan_review\uFF09\u2014\u2014");
-    body.push('       \u89C4\u5219\u662F"\u63D0\u8BAE\u8005\u4E0D\u80FD\u5BA1\u81EA\u5DF1\u7684\u63D0\u6848"\uFF0C\u800C\u4E14 DSH \u4FA7\u7684\u6865\u6CA1\u66B4\u9732 review \u5DE5\u5177\uFF0C\u4F60\u81EA\u5DF1\u6279\u4E0D\u4E86\u3002');
+    body.push("       \u89C4\u5219\u662F\u300C\u63D0\u8BAE\u8005\u4E0D\u80FD\u5BA1\u81EA\u5DF1\u7684\u63D0\u6848\u300D\u2014\u2014 \u4E5F\u5C31\u662F\u8BF4\u4F60\u9700\u8981\u53E6\u4E00\u4E2A\u4F1A\u8BDD\uFF08\u6216\u7528\u6237\uFF09\u6765\u6279\uFF1B");
+    body.push("       project_plan_review \u8FD9\u4E2A\u5DE5\u5177\u672C\u8EAB\u662F\u53EF\u7528\u7684\uFF08\u5DF2\u5B9E\u6D4B\uFF09\u3002");
+    body.push("       **\u6279\u5B8C\u4E4B\u540E\u8BA1\u5212\u4F1A\u89E3\u9501**\uFF0C\u4E4B\u540E\u5C31\u80FD\u76F4\u63A5 project_task_create \u5EFA\u4EFB\u52A1\uFF0C\u4E0D\u7528\u6BCF\u6B21\u90FD\u8D70\u63D0\u6848\u3002");
     body.push("  6) \u62C6\u5B8C\u628A\u7ED3\u679C\u544A\u8BC9\u6211\uFF1A\u62C6\u6210\u4E86\u54EA\u51E0\u5757\u3002**\u4E0D\u8981\u81EA\u5DF1\u5F00\u5B50\u4F1A\u8BDD\u5206\u6D3E\u4EFB\u52A1** \u2014\u2014 \u6211\u81EA\u5DF1\u627E\u4EBA\u505A\u3002");
     body.push(...discipline());
     return body.join("\n");
@@ -4732,7 +4936,7 @@
     return [...items].sort((a, b) => projUrgency(a) - projUrgency(b) || readyOf(b) - readyOf(a) || a.name.localeCompare(b.name, "zh"));
   }
   function projCard(p) {
-    const st = projState(p);
+    const st2 = projState(p);
     const { done, total } = prog(p);
     const pct = total ? Math.round(done / total * 100) : 0;
     const readyN = readyOf(p);
@@ -4741,31 +4945,33 @@
     const t0 = p.tasks[0];
     const artN = p.artifacts || 0;
     const mapN = p.mapNodes || 0;
+    const ckN = p.checkpoints || 0;
     const extraBits = [];
     if (artN > 0) extraBits.push(`<span class="meta-extra" title="${artN} \u4E2A\u4EA7\u51FA\uFF08\u4F1A\u8BDD\u53D1\u5E03\u8FC7\u7684\u4EA4\u4ED8\u7269\uFF09"><svg class="ic"><use href="#i-artifact"/></svg>${artN}</span>`);
+    if (ckN > 0) extraBits.push(`<span class="meta-extra" title="${ckN} \u6761\u68C0\u67E5\u70B9\uFF08\u4F1A\u8BDD\u8BB0\u5F55\u7684\u8FC7\u7A0B\uFF1A\u505A\u4E86\u4EC0\u4E48 / \u5751 / \u4E0B\u4E00\u6B65\uFF09"><svg class="ic"><use href="#i-log"/></svg>${ckN}</span>`);
     if (mapN > 0) extraBits.push(`<span class="meta-extra" title="\u4EE3\u7801\u5730\u56FE ${mapN} \u8282\u70B9 / ${p.mapEdges || 0} \u6761\u8C03\u7528\u5173\u7CFB"><svg class="ic"><use href="#i-graph"/></svg>${mapN}</span>`);
     const extraRow = extraBits.length ? `<div class="mr">${extraBits.join("")}</div>` : "";
-    const meta = total === 0 ? `<div class="mr"><span>\u672A\u62C6\u89E3 \xB7 \u5148\u7528\u300C\u62C6\u4EFB\u52A1\u300D\u628A\u5B83\u62C6\u5F00</span></div>${extraRow}` : single ? `<div class="mr"><span class="meta-ready">${t0 ? taskLabel(t0).label : ""}</span><span>${p.ago}</span></div>${extraRow}` : `<div class="mr"><span class="cells" title="${total} \u4E2A\u4EFB\u52A1\uFF08\u5DF2\u5B8C\u6210 ${done} / \u8FDB\u884C\u4E2D ${inFlightOf(p)} / \u5F85\u9A8C\u6536 ${reviewOf(p)} / \u5F85\u5F00\u59CB ${readyN}\uFF09">${Array(done).fill('<i class="c done"></i>').join("") + Array(inFlightOf(p)).fill('<i class="c doing"></i>').join("") + Array(readyN).fill('<i class="c ready"></i>').join("")}</span><span>${done}/${total}</span>${readyN ? `<span class="meta-ready">${readyN} \u5F85\u5F00\u59CB</span>` : ""}<span>${p.ago}</span></div>${extraRow}`;
+    const meta = total === 0 ? `<div class="mr"><span>\u672A\u62C6\u89E3 \xB7 \u5148\u7528\u300C\u62C6\u4EFB\u52A1\u300D\u628A\u5B83\u62C6\u5F00</span></div>${extraRow}` : single ? `<div class="mr"><span class="meta-ready">${t0 ? taskLabel(t0).label : ""}</span><span>${p.ago}</span></div>${stallNote(p)}${extraRow}` : `<div class="mr"><span class="cells" title="${total} \u4E2A\u4EFB\u52A1\uFF08\u5DF2\u5B8C\u6210 ${done} / \u8FDB\u884C\u4E2D ${inFlightOf(p)} / \u5F85\u9A8C\u6536 ${reviewOf(p)} / \u5F85\u5F00\u59CB ${readyN}\uFF09">${Array(done).fill('<i class="c done"></i>').join("") + Array(inFlightOf(p)).fill('<i class="c doing"></i>').join("") + Array(readyN).fill('<i class="c ready"></i>').join("")}</span><span>${done}/${total}</span>${readyN ? `<span class="meta-ready">${readyN} \u5F85\u5F00\u59CB</span>` : ""}<span>${p.ago}</span></div>${stallNote(p)}${extraRow}`;
+    const acts = empty ? "" : `<div class="card-acts">` + (!single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>\u590D\u5236\u73B0\u72B6\u7B80\u62A5</button>` : "") + `<button class="card-copy always" data-export-proj="${p.key}" title="\u5BFC\u51FA\u8FDB\u5EA6\u62A5\u544A\uFF08PDF\uFF09"><svg class="ic"><use href="#i-download"/></svg>\u5BFC\u51FA</button></div>`;
     return `
   <div class="card" data-proj="${p.key}">
     <div class="card-body">
-      <div class="card-top"><span class="card-name">${p.name}</span><span class="badge ${st.cls}"><svg class="ic"><use href="#${st.icon}"/></svg>${st.label}</span></div>
+      <div class="card-top"><span class="card-name">${p.name}</span><span class="badge ${st2.cls}"><svg class="ic"><use href="#${st2.icon}"/></svg>${st2.label}</span></div>
       ${p.sub ? `<div class="card-sub">${p.sub}${total > 1 ? ` \xB7 ${total} \u4E2A\u4EFB\u52A1` : ""}</div>` : total > 1 ? `<div class="card-sub">${total} \u4E2A\u4EFB\u52A1</div>` : ""}
       <div class="card-meta">${meta}</div>
       ${p.tags.length ? `<div class="tags">${p.tags.map((x) => `<span class="tag">${x}</span>`).join("")}</div>` : ""}
     </div>
-    ${empty ? `<button class="card-copy always" data-split-proj="${p.key}"><svg class="ic"><use href="#i-split"/></svg>\u62C6\u4EFB\u52A1</button>` : ""}
-    ${single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>\u590D\u5236\u63A5\u7EED\u5757</button>` : ""}
-    ${!empty && !single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>\u590D\u5236\u73B0\u72B6\u7B80\u62A5</button>` : ""}
+
+    ${acts}
   </div>`;
   }
   function taskCard(p, t, i = 0) {
-    const st = taskLabel(t);
+    const st2 = taskLabel(t);
     return `
   <div class="tcard" style="animation-delay:${i * 45}ms">
     <div class="tcard-top">
       <span class="tcard-title">${t.title}</span>
-      <span class="badge ${st.cls}"><svg class="ic"><use href="#${st.icon}"/></svg>${st.label}</span>
+      <span class="badge ${st2.cls}"><svg class="ic"><use href="#${st2.icon}"/></svg>${st2.label}</span>
     </div>
     <div class="tcard-meta">
       <span class="tkey">${t.key}</span>
@@ -4854,10 +5060,10 @@
       const h = listEl.querySelector("[data-vt]");
       if (h) h.style.viewTransitionName = name;
     });
-    if ((!p.tasks.length || libraryDirty) && p.total > 0) {
+    if ((!p.tasks.length || dirtyProjects.has(key)) && p.total > 0) {
       p.tasks = [];
       p.fromDb = false;
-      libraryDirty = false;
+      dirtyProjects.delete(key);
       await loadTasks(key);
       if (open && view.kind === "tasks" && view.proj === key) renderTasks(key);
     }
@@ -4899,6 +5105,11 @@
       const p = byKey(splitP.dataset.splitProj);
       await copyText(splitBlock(p), `${p.name} \xB7 \u62C6\u4EFB\u52A1`);
       flash(splitP);
+      return;
+    }
+    const expP = t.closest("[data-export-proj]");
+    if (expP) {
+      void exportProjectPdf(expP.dataset.exportProj, expP);
       return;
     }
     const copyP = t.closest("[data-copy-proj]");
@@ -4961,11 +5172,38 @@
     ``,
     `\u3010\u7B2C\u4E00\u6B65 \xB7 \u76D8\u70B9\u3011\u628A\u672C\u4F1A\u8BDD\u4ECE\u5F00\u59CB\u5230\u73B0\u5728\u505A\u8FC7\u7684\u4EFB\u52A1\u5217\u4E00\u904D\u3002\u6539\u8FC7\u4EE3\u7801 / \u5199\u8FC7\u6587\u6863 /`,
     `   \u67E5\u8FC7\u95EE\u9898\u5E76\u5F97\u51FA\u8FC7\u7ED3\u8BBA \u2014\u2014 \u90FD\u7B97\u3002\u7279\u522B\u6CE8\u610F\u6CA1\u5728\u5E93\u91CC\u9886\u8FC7\u7684\u90A3\u4E9B\uFF08\u6700\u5BB9\u6613\u6F0F\uFF09\u3002`,
+    `   \u26A0 \u90A3\u4E00\u6279\u91CC\u5982\u679C\u6709\u7684**\u5DF2\u7ECF\u987A\u624B\u6807\u4E86 done**\uFF08\u6CA1\u9886\u8FC7\u4E5F\u80FD\u6807\uFF09\uFF0C\u73B0\u5728\u662F\u8865\u8BB0\u4E0D\u8FDB\u5E93\u7684 \u2014\u2014`,
+    `     \u9010\u6761\u8BD5\u90FD\u4F1A\u62A5\u9519\u3002\u7528\u8FD9\u4E00\u6761\u6253\u5F00\uFF1A`,
+    `     project_task_reopen(task_id=<id>, session_id=<\u4F60>, reason="<\u4E3A\u4EC0\u4E48\u8981\u91CD\u5F00>")`,
+    `     \u5B83\u628A\u4EFB\u52A1\u9000\u56DE pending\uFF08\u6E05 owner\u3001\u7559 task_reopened \u4E8B\u4EF6\uFF09\uFF0C`,
+    `     \u4E4B\u540E\u5C31\u80FD\u6B63\u5E38\u8D70\uFF1A\u9886 \u2192 \u8865\u68C0\u67E5\u70B9 \u2192 \u518D\u6807 done\u3002`,
+    `     reason \u662F\u5FC5\u586B\u7684 \u2014\u2014 \u5E73\u53F0\u4E0D\u7559\u300C\u6084\u6084\u6539\u7EC8\u6001\u300D\u7684\u53E3\u5B50\u3002`,
+    `     \uFF08\u5DF2 done \u7684\u4EFB\u52A1\u4E0D\u80FD\u76F4\u63A5\u6539\u72B6\u6001\uFF1Adone\u2192running \u4F1A\u88AB\u62D2\uFF0C\u7406\u7531\u662F Self-approval \u2014\u2014`,
+    `       \u5B9E\u6D4B\u6709\u4EFB\u52A1\u88AB\u8BA4\u9886 4 \u6B21\u3001\u6807 done 3 \u6B21\uFF0C\u5951\u7EA6/\u5BF9\u8D26/\u4EA7\u51FA\u5168\u6210\u4E86\u53EF\u88AB\u9759\u9ED8\u63A8\u7FFB\u7684\u6B8B\u7559\u3002\uFF09`,
+    ``,
+    `   \u2605 \u66F4\u7701\u4E8B\u7684\u505A\u6CD5\uFF08\u4E0B\u6B21\u5F00\u5DE5\u5C31\u8FD9\u4E48\u5E72\uFF09\uFF1A**\u4E00\u4EF6\u4E8B\u4E00\u5F20\u5361\uFF0C\u52A8\u624B\u524D\u5148\u5EFA\u597D**\u3002`,
+    `     \u4E00\u4E2A\u4F1A\u8BDD\u5F80\u5F80\u4E00\u53E3\u6C14\u5E72\u597D\u51E0\u4EF6\u4E8B\uFF0C\u5982\u679C\u90FD\u7B49\u5E72\u5B8C\u624D\u56DE\u5934\u8865\u5361\uFF0C\u5C31\u5F97\u9010\u4E2A\u5224\u65AD`,
+    `     \u300C\u8FD9\u6D3B\u539F\u6765\u90A3\u5F20\u5361\u7684\u5408\u540C\u91CC\u6709\u6CA1\u6709\u8981\u6C42\u300D\uFF08\u7B2C\u56DB\u6B65\u90A3\u5957\uFF09\uFF0C\u5F88\u8D39\u795E\u3001\u4E5F\u5BB9\u6613\u6F0F\u3002`,
+    `     \u5F00\u5DE5\u524D\u5148\u5EFA\u597D\u5361\uFF0C\u6536\u5C3E\u65F6\u9010\u4E2A\u95ED\u73AF\u5C31\u884C\uFF0C\u4E0D\u7528\u518D\u8865\u3002`,
+    ``,
+    `   \u2605 \u611F\u89C9\u5FEB\u6CA1\u4E0A\u4E0B\u6587\u4E86 / \u8981\u88AB\u4E2D\u65AD\u65F6\uFF1A**\u5148\u628A\u73B0\u573A\u51BB\u4F4F\u518D\u8D70**\uFF0C\u522B\u786C\u6491\u5230\u88AB\u622A\u65AD\u3002`,
+    `     project_handoff(project=\u2026, task_id=<id>, from_session_id=<\u4F60>, kind="mid-cycle",`,
+    `       summary="\u4E00\u53E5\u8BDD\u8BF4\u660E\u4E3A\u4EC0\u4E48\u4E2D\u65AD",`,
+    `       state={current_edit:[\u2026], in_flight_reasoning:[\u2026], decisions_made:[\u2026], decisions_deferred:[\u2026]})`,
+    `     \u56DB\u4E2A\u5C0F\u8282\uFF08\u81F3\u5C11\u5199\u4E00\u4E2A\uFF09\uFF1A`,
+    `       current_edit        \u6539\u5230\u54EA\u4E86\uFF1A\u54EA\u4E9B\u6587\u4EF6\u3001\u4EC0\u4E48\u72B6\u6001\u3001\u8FD8\u5DEE\u4EC0\u4E48`,
+    `       in_flight_reasoning \u2605 \u8111\u5B50\u91CC\u6B63\u5728\u60F3\u7684\uFF08\u8FD8\u6CA1\u5199\u8FDB\u4EE3\u7801/\u6587\u6863\u7684\u63A8\u7406\uFF09\u2014\u2014 \u8FD9\u6761**\u6700\u5BB9\u6613\u4E22**\uFF0C`,
+    `                            \u4EE3\u7801\u91CC\u6839\u672C\u6CA1\u6709\u5B83\uFF0C\u4F1A\u8BDD\u4E00\u65AD\u5C31\u6C38\u4E45\u6CA1\u4E86`,
+    `       decisions_made      \u5DF2\u7ECF\u5B9A\u7684\u4E8B\uFF08\u5199\u6E05\u7406\u7531\uFF0C\u514D\u5F97\u4E0B\u4E2A\u4EBA\u91CD\u65B0\u8BA8\u8BBA\u4E00\u904D\uFF09`,
+    `       decisions_deferred  \u6545\u610F\u7559\u7ED9\u540E\u9762\u5B9A\u7684\u4E8B\uFF0C\u4EE5\u53CA\u4E3A\u4EC0\u4E48\u73B0\u5728\u4E0D\u5B9A`,
+    `     \u4E0D\u5199\u7684\u8BDD\uFF0C\u4E0B\u4E2A\u4F1A\u8BDD\u8981\u4E48\u91CD\u8BFB\u5168\u4ED3\u5E93\uFF0C\u8981\u4E48\u8E29\u4E00\u904D\u540C\u6837\u7684\u5751\u3002`,
     ``,
     `\u3010\u7B2C\u4E8C\u6B65 \xB7 \u9010\u4E2A\u95ED\u73AF\u3011\u5BF9\u6BCF\u4E00\u4E2A\u4EFB\u52A1\uFF0C\u6309\u8FD9\u4E2A\u987A\u5E8F\u505A\uFF08\u987A\u5E8F\u9519\u4E86\u4F1A\u628A\u81EA\u5DF1\u9501\u6B7B\uFF09\uFF1A`,
     `   \u2460 project_task_dispatch(project=\u2026, task_key="<\u4EFB\u52A1\u7684 key>") \u2192 \u62FF\u5230 id\uFF0832 \u4F4D uuid\uFF09`,
     `      \u26A0 \u540E\u9762\u6240\u6709\u5DE5\u5177\u8981\u7684\u90FD\u662F\u8FD9\u4E2A **id**\uFF0C\u4E0D\u662F key \u2014\u2014 \u4F20 key \u4F1A\u62A5 Task not found\u3002`,
     `      \u6CA1\u9886\u8FC7\u4EFB\u52A1\u7684\u540E\u679C\uFF1A\u53D1\u4E0D\u51FA\u4EA7\u51FA\u3001\u6807\u4E0D\u4E86\u5B8C\u6210\uFF08\u90FD\u8981\u6C42"\u4EFB\u52A1\u5728\u4F60\u540D\u4E0B"\uFF09\u3002`,
+    `      \u5148\u6807 done \u4F1A\u5BFC\u81F4\u53D1\u4E0D\u51FA\u4EA7\u51FA\uFF08artifact_publish \u8981\u6C42\u4EFB\u52A1\u662F\u6D3B\u8DC3\u7684\uFF09\uFF1B`,
+    `      \u4EE3\u7801\u5730\u56FE\u4E0D\u4E00\u6837 \u2014\u2014 \u6807\u4E86 done \u4E5F\u80FD\u8865\u5199\uFF0C\u53EA\u8981\u4F60\u5728\u672C\u9879\u76EE\u91CC\u5E72\u8FC7\u3002`,
     `   \u2461 project_checkpoint(project=\u2026, task_id=<id>, state={...}) \u2014\u2014 \u4E94\u9879\u4E00\u4E2A\u90FD\u522B\u7701\uFF1A`,
     `        completed \u5B8C\u6210\u4E86\u4EC0\u4E48 / not_done \u6CA1\u5B8C\u6210\u4EC0\u4E48 / pitfalls \u8E29\u8FC7\u7684\u5751\uFF08\u2605 \u6700\u91CD\u8981\uFF0C\u5199\u5177\u4F53\uFF09`,
     `        / blockers \u5361\u5728\u4EC0\u4E48\u5916\u90E8\u4F9D\u8D56 / next_action \u4E0B\u4E00\u6B65`,
@@ -4973,10 +5211,54 @@
     `   \u2462 project_artifact_publish(project=\u2026, task_id=<id>, kind="doc", path="<\u771F\u5B9E\u6587\u4EF6\u7EDD\u5BF9\u8DEF\u5F84>")`,
     `      \u8DEF\u5F84\u5FC5\u987B\u843D\u5728\u9879\u76EE\u76EE\u5F55\u5185\u3001\u6587\u4EF6\u5FC5\u987B\u771F\u7684\u5B58\u5728\uFF0C\u5426\u5219\u5F53\u573A\u62A5\u9519\u3002`,
     `   \u2463 project_task_update(project=\u2026, task_id=<id>, status="done", next_action="\u4E0B\u4E00\u6B65")`,
-    `   \u2464 \u4EE3\u7801\u5730\u56FE\u8981\u66F4\u65B0\u7684\u8BDD\u653E**\u6700\u540E**\uFF08\u5B83\u8981\u6C42\u4F60\u624B\u91CC\u8FD8\u6709\u6D3B\u8DC3\u4EFB\u52A1\uFF0C\u5148\u6807 done \u5C31\u5199\u4E0D\u8FDB\u53BB\u4E86\uFF09\u3002`,
+    `      \u26A0 \u6807 done \u4E4B\u524D\u5148\u8DD1\u4E00\u904D\u9A8C\u6536\u5224\u636E\uFF1Aproject_preflight(project=\u2026, task_id=<id>)`,
+    `        \u5B83\u6267\u884C\u5408\u540C\u91CC\u7684\u53EF\u5224\u5B9A\u5224\u636E\uFF0C\u544A\u8BC9\u4F60\u54EA\u6761\u8FD8\u6CA1\u8FC7 \u2014\u2014 \u5728**\u8FD8\u80FD\u6539**\u7684\u65F6\u5019\u770B\u5230\u3002`,
+    `        \u5199\u5408\u540C/\u6539\u5408\u540C\u65F6\u5C3D\u91CF\u628A\u9A8C\u6536\u6807\u51C6\u5199\u6210\u5224\u636E\uFF08\u81EA\u7136\u8BED\u8A00\u7167\u65E7\u53EF\u4EE5\u5199\uFF0C\u53EA\u662F\u4E0D\u4F1A\u88AB\u81EA\u52A8\u9A8C\uFF09\uFF1A`,
+    `          file_exists:<\u8DEF\u5F84> / no_placeholders:<\u8DEF\u5F84> / grep_absent:<\u8DEF\u5F84>::<\u6587\u672C> /`,
+    `          sha256:<\u8DEF\u5F84>::<\u6458\u8981> / tests_pass:<\u547D\u4EE4> / endpoint_ok:<URL>`,
+    `        \u5408\u540C\u6539\u4E86\u4F1A\u7559\u7248\u672C\u5386\u53F2\uFF08project_contract_history \u53EF\u67E5\u8C01\u5728\u4EC0\u4E48\u65F6\u5019\u6539\u4E86\u4EC0\u4E48\uFF09\u3002`,
+    `   \u2464 \u4EE3\u7801\u5730\u56FE\u8981\u5728\u6807 done \u4E4B\u524D\u66F4\u65B0\uFF08\u90A3\u65F6\u8BED\u4E49\u6700\u6E05\u695A\uFF09\u3002\u5DF2\u7ECF\u6807\u4E86 done \u4E5F\u80FD\u8865\u5199 \u2014\u2014`,
+    `      \u53EA\u8981\u4F60\u5728\u672C\u9879\u76EE\u91CC\u5E72\u8FC7\uFF08\u62E5\u6709\u4EFB\u52A1 / \u8FD1 7 \u5929\u6709\u68C0\u67E5\u70B9\uFF09\u5C31\u653E\u884C\u3002`,
+    ``,
+    `   \u26A0 \u5E72\u6D3B\u671F\u95F4\u5B9A\u671F\u53D1\u4E00\u6B21\u5FC3\u8DF3\uFF1Aproject_session_heartbeat(session_id=<\u4F60\u7684 id>, task_id=<id>)`,
+    `     \u4E3A\u4EC0\u4E48\u5FC5\u987B\u53D1\uFF1A\u9762\u677F\u5224\u300C\u5728\u4E0D\u5728\u5E72\u300D\u9760\u4E24\u4EF6\u4E8B\uFF0C\u5E73\u53F0\u5DF2\u628A\u5B83\u4EEC\u62C6\u6210\u4E24\u4E2A\u5B57\u6BB5 \u2014\u2014`,
+    `       \xB7 \u5FC3\u8DF3\u7EED\u7684\u662F **liveness**\uFF08\u300C\u6211\u8FD8\u5728\u300D\uFF09\uFF1A\u8D85\u8FC7 2 \u5C0F\u65F6\u4E0D\u53D1\uFF0C\u4F1A\u8BDD\u4F1A\u88AB\u56DE\u843D\u5230 idle\u3001\u4EFB\u52A1\u88AB\u91CA\u653E`,
+    `       \xB7 \u68C0\u67E5\u70B9/\u4EA7\u51FA\u52A8\u7684\u662F **progress**\uFF08\u300C\u6211\u5728\u63A8\u8FDB\u300D\uFF09\uFF1A\u5FC3\u8DF3**\u4E0D\u4F1A**\u52A8\u5B83`,
+    `     \u6240\u4EE5\u300C\u5149\u53D1\u5FC3\u8DF3\u4E0D\u5199\u68C0\u67E5\u70B9\u300D\u4E0D\u4F1A\u8BA9\u4F60\u53D8\u56DE\u300C\u5F85\u5F00\u59CB\u300D\uFF08\u90A3\u6B63\u662F\u4EE5\u524D\u90A3\u4E2A bug\uFF0C\u5DF2\u4FEE\uFF09\uFF0C`,
+    `     \u9762\u677F\u4F1A\u663E\u793A\u300C\u8FDB\u884C\u4E2D\u300D\u4F46\u6253\u4E0A**\u300C\u5360\u7740\u6CA1\u63A8\u8FDB\u300D**\u7684\u6807\u8BB0 \u2014\u2014 \u90A3\u662F\u63D0\u9192\u4F60\u8BE5\u5199\u68C0\u67E5\u70B9\u4E86\uFF0C\u4E0D\u662F\u8BF4\u4F60\u6CA1\u5E72\u3002`,
+    `     \u2605 \u5E72\u957F\u6D3B\u4E4B\u524D\u5148\u58F0\u660E ETA\uFF0C\u9762\u677F\u5728 ETA \u4E4B\u524D\u5C31\u4E0D\u4F1A\u50AC\u4F60\uFF1A`,
+    `       project_session_heartbeat(session_id=<\u4F60\u7684 id>, task_id=<id>, eta_seconds=5400)`,
+    `       \u6D3B\u6BD4\u9884\u671F\u4E45\u5C31**\u518D\u53D1\u4E00\u6B21\u5E26\u65B0 eta_seconds \u7684\u5FC3\u8DF3**\u6539\u4E00\u4E0B \u2014\u2014 \u62A5\u9519\u7684 ETA \u6BD4\u4E0D\u62A5\u66F4\u7CDF\u3002`,
     ``,
     `\u3010\u7B2C\u4E09\u6B65 \xB7 \u81EA\u68C0\u3011\u9010\u4E2A\u5FF5\u4E00\u904D\uFF1A\u8FD9\u4E2A\u4EFB\u52A1\u5728\u5E93\u91CC\u662F done \u4E86\u5417\uFF1F\u5B83\u6709\u68C0\u67E5\u70B9\u4E86\u5417\uFF1F`,
     `   \u6211\u7B2C\u4E00\u6B65\u5217\u51FA\u7684\u4EFB\u52A1\uFF0C\u6709\u6CA1\u6709\u54EA\u4E2A\u8FD8\u6CA1\u8D70\u5B8C\u4E0A\u9762\u8FD9\u51E0\u6B65\uFF1F`,
+    ``,
+    `\u3010\u7B2C\u56DB\u6B65 \xB7 \u5224\u65AD\u8981\u4E0D\u8981\u65B0\u5EFA\u5361\u3011\u2014\u2014 \u8FD9\u4E00\u6B65\u6700\u5BB9\u6613\u628A\u5E93\u641E\u4E71\uFF0C\u52A1\u5FC5\u8D70\u4E00\u904D\u3002`,
+    `   \u5E72\u5B8C\u4E00\u5757\u6D3B\u4E4B\u540E\u5148\u95EE\u81EA\u5DF1\uFF1A\u8FD9\u5757\u6D3B**\u539F\u6765\u4EFB\u52A1\u7684\u5408\u540C\u91CC\u6709\u6CA1\u6709\u8981\u6C42**\uFF1F`,
+    `   \uFF08\u5408\u540C\u5728 context pack \u91CC\uFF0C\u662F Objective / Acceptance / Constraints \u90A3\u51E0\u884C\u3002\uFF09`,
+    ``,
+    `   \xB7 \u5408\u540C\u91CC\u8981\u6C42\u7684\uFF08\u6BD4\u5982 acceptance \u5217\u7740\u7684\u90A3\u51E0\u6761\u3001constraints \u91CC\u7684\u90A3\u51E0\u6761\uFF09`,
+    `     \u2192 **\u522B\u5EFA\u65B0\u5361**\u3002\u5728\u539F\u4EFB\u52A1\u91CC\u591A\u5199\u4E00\u4E2A\u68C0\u67E5\u70B9\u5C31\u591F\u4E86\u3002`,
+    `       \u65B0\u5EFA\u5361\u4F1A\u548C\u539F\u4EFB\u52A1\u8303\u56F4\u91CD\u53E0 \u2192 \u4E24\u5F20\u5361\u8BF4\u540C\u4E00\u4EF6\u4E8B \u2192 \u5BF9\u8D26\u65F6\u5224\u4E0D\u6E05\u3002`,
+    ``,
+    `   \xB7 \u5408\u540C\u91CC**\u6CA1\u6709**\u7684\u3001\u4F60\u6267\u884C\u4E2D\u65B0\u53D1\u73B0\u7684\u6D3B`,
+    `     \u2192 **\u5EFA\u65B0\u5361**\uFF1A\u505A\u5B8C\u6807 done\uFF0C\u6CA1\u505A\u5B8C\u7559 pending\uFF08\u8FD9\u624D\u662F\u9762\u677F\u8BE5\u663E\u793A\u7684\u65B0\u5F85\u529E\uFF09\u3002`,
+    `       \u5EFA\u4E4B\u524D\u518D\u786E\u8BA4\u4E00\u6B21\u5B83\u4E0D\u662F\u539F\u4EFB\u52A1\u7684\u7EC4\u6210\u90E8\u5206 \u2014\u2014 \u62FF\u4E0D\u51C6\u5C31\u95EE\u4EBA\uFF0C\u522B\u81EA\u5DF1\u5B9A\u3002`,
+    ``,
+    `   \xB7 \u771F\u53D1\u73B0\u8303\u56F4\u53D8\u4E86\uFF08\u539F\u4EFB\u52A1\u540D\u548C\u73B0\u5728\u8981\u505A\u7684\u5BF9\u4E0D\u4E0A\uFF09`,
+    `     \u2192 \u5E73\u53F0**\u4E0D\u5141\u8BB8\u6539\u4EFB\u52A1\u540D / \u8BF4\u660E**\uFF08project_task_update \u53EA\u6539 status / next_action\uFF09\u3002`,
+    `       \u6B63\u786E\u505A\u6CD5\u662F**\u66F4\u65B0\u5408\u540C**\u6216\u628A\u65B0\u8303\u56F4\u62C6\u6210\u65B0\u5361\uFF0C\u522B\u9760\u6539\u6570\u636E\u5E93\u7ED5\u8FC7\u3002`,
+    ``,
+    `   \u26A0 \u65E0\u8BBA\u5EFA\u4E0D\u5EFA\u5361\uFF1A**\u53D1\u73B0\u4E86\u4F46\u6CA1\u505A\u7684\u6D3B\uFF0C\u5FC5\u987B\u5199\u8FDB\u68C0\u67E5\u70B9\u7684 not_done**\u3002`,
+    `     \u90A3\u662F\u5B83\u4F20\u5230\u4E0B\u4E00\u4E2A\u4F1A\u8BDD\u7684\u552F\u4E00\u901A\u9053 \u2014\u2014 \u9762\u677F\u4E0D\u663E\u793A\u68C0\u67E5\u70B9\uFF0C\u4E0D\u5199\u5C31\u7B49\u4E8E\u4E22\u4E86\u3002`,
+    ``,
+    `   \u5EFA\u5361\u7684\u95E8\u7981\uFF08\u7167\u6284\u5373\u53EF\uFF09\uFF1A`,
+    `     \xB7 \u8BA1\u5212\u6CA1\u9501 \u2192 \u76F4\u63A5 project_task_create(project=\u2026, task_key=\u2026, title=\u2026, description=\u2026)`,
+    `       \uFF08\u6CE8\u610F\uFF1Abootstrap \u51FA\u6765\u7684\u65B0\u9879\u76EE\u521D\u59CB\u90FD\u662F**\u9501\u7740\u7684**\uFF0C\u6240\u4EE5\u7B2C\u4E00\u6B21\u591A\u534A\u8981\u8D70\u4E0B\u9762\u7684\u63D0\u6848\u8DEF\u5F84\uFF1B`,
+    `       \u8D70\u5B8C\u4E00\u6B21\u590D\u6838\u5C31\u89E3\u9501\uFF0C\u4E4B\u540E\u5C31\u80FD\u76F4\u63A5\u5EFA\u4E86\u3002\uFF09`,
+    `     \xB7 \u82E5\u62A5 "initial plan is locked" \u2192 \u53EA\u80FD\u63D0\u6848\uFF1Aproject_plan_propose(project=\u2026, reason=\u2026,`,
+    `       changes=[{operation:"add_task", task_key:\u2026, title:\u2026, description:\u2026}]) \u7136\u540E**\u8BF7\u7528\u6237\u6216\u53E6\u4E00\u4E2A\u4F1A\u8BDD**\u5BA1\u6279`,
+    `       \uFF08\u89C4\u5219\uFF1A\u63D0\u8BAE\u8005\u4E0D\u80FD\u5BA1\u81EA\u5DF1 \u2014\u2014 \u9700\u8981\u53E6\u4E00\u4E2A\u4F1A\u8BDD\u6216\u7528\u6237\u6765\u6279\uFF1Bproject_plan_review \u672C\u8EAB\u53EF\u7528\uFF09\u3002`,
     ``,
     `\u60F3\u8BA9\u9762\u677F\u52A8\uFF0C\u5FC5\u987B\u52A8**\u4EFB\u52A1\u672C\u8EAB**\uFF08\u72B6\u6001 / \u8BF4\u660E / \u4E0B\u4E00\u6B65\uFF09\u2014\u2014 \u9762\u677F\u8BFB\u7684\u662F\u5B83\u3002`,
     `\u5B8C\u6574\u673A\u5236\uFF08\u542B\u5404\u79CD\u95E8\u7981\u548C\u62A5\u9519\u539F\u56E0\uFF09\u89C1 D:\\codex-memory\\README.md \u548C\u5404\u9879\u76EE AGENTS.md\u3002`
@@ -5128,6 +5410,7 @@
   };
   var es = null;
   var sseRetry = 0;
+  var sseLastOkAt = 0;
   async function startSSE() {
     if (!isTauri || es) return;
     try {
@@ -5143,14 +5426,22 @@
       await invoke("start_event_stream", {});
       es = { close: () => {
       } };
+      sseRetry = 0;
+      sseLastOkAt = Date.now();
     } catch (e) {
       sseRetry++;
-      void logDbg("SSE \u542F\u52A8\u5931\u8D25: " + String(e).slice(0, 220));
-      if (sseRetry < 4) setTimeout(() => {
+      void logDbg(`SSE \u542F\u52A8\u5931\u8D25\uFF08\u7B2C ${sseRetry} \u6B21\uFF09: ` + String(e).slice(0, 220));
+      const wait = Math.min(3e4, 4e3 * sseRetry);
+      setTimeout(() => {
         es = null;
-        startSSE();
-      }, 8e3);
+        void startSSE();
+      }, wait);
     }
+  }
+  function reconnectSSE() {
+    es = null;
+    sseRetry = 0;
+    void startSSE();
   }
   function stopSSE() {
     if (es) {
@@ -5174,10 +5465,355 @@
         loadTasks(view.proj);
       }
     } else {
-      libraryDirty = true;
+      for (const x of ALL) dirtyProjects.add(x.key);
     }
     const key = String(d?.kind || "");
     const label = KIND_TEXT[key] || (key ? key.replace(/_/g, " ") : "\u6570\u636E\u6709\u66F4\u65B0");
     if (open) toast(`\u5171\u4EAB\u5E93 \xB7 ${label}`);
+  }
+  var syncing = false;
+  async function syncNow() {
+    if (syncing) return;
+    syncing = true;
+    const btn = document.getElementById("syncBtn");
+    btn?.classList.add("spinning");
+    const problems = [];
+    try {
+      reconnectSSE();
+      collecting = true;
+      addedProjects = [];
+      changedProjectCount = 0;
+      changedProjectDetail = [];
+      await loadProjects();
+      collecting = false;
+      const viewing = view.kind === "tasks" ? view.proj : "";
+      if (viewing) {
+        const p = byKey(viewing);
+        const before = new Map((p?.tasks ?? []).map((t) => [t.key, t.status]));
+        if (p) {
+          p.tasks = [];
+          p.fromDb = false;
+        }
+        await loadTasks(viewing);
+        dirtyProjects.delete(viewing);
+        const after = byKey(viewing)?.tasks ?? [];
+        for (const t of after) {
+          const was = before.get(t.key);
+          if (was && was !== t.status) changedProjectDetail.push(`\u4EFB\u52A1 ${t.key}\uFF1A${was} \u2192 ${t.status}`);
+          else if (!was) changedProjectDetail.push(`\u4EFB\u52A1 ${t.key}\uFF1A\u65B0\u51FA\u73B0`);
+        }
+        if (open && view.kind === "tasks" && view.proj === viewing) renderTasks(viewing);
+      }
+      const verify = await verifyConsistency();
+      const lines = [];
+      const fresh = lastLoadAt ? Math.round((Date.now() - lastLoadAt) / 1e3) : -1;
+      const sseOk = sseLastOkAt > 0;
+      const sseAge = sseOk ? Math.round((Date.now() - sseLastOkAt) / 1e3) : -1;
+      if (!addedProjects.length && !changedProjectCount) {
+        lines.push("\u6CA1\u6709\u53D8\u5316 \u2014\u2014 \u9762\u677F\u672C\u6765\u5C31\u662F\u6700\u65B0\u7684");
+      } else {
+        if (addedProjects.length) lines.push(`\u65B0\u51FA\u73B0\uFF1A${addedProjects.length} \u4E2A\u9879\u76EE\uFF08${addedProjects.slice(0, 3).join("\u3001")}${addedProjects.length > 3 ? " \u2026" : ""}\uFF09`);
+        if (changedProjectCount) lines.push(`\u6709\u53D8\u5316\uFF1A${changedProjectCount} \u4E2A\u9879\u76EE`);
+        for (const d of changedProjectDetail.slice(0, 4)) lines.push("  " + d);
+        if (changedProjectDetail.length > 4) lines.push(`  \u2026\u8FD8\u6709 ${changedProjectDetail.length - 4} \u6761`);
+      }
+      lines.push(sseOk ? `\u5B9E\u65F6\u901A\u9053\uFF1A\u6B63\u5E38\uFF08${sseAge} \u79D2\u524D\u6302\u4E0A\uFF09` : "\u5B9E\u65F6\u901A\u9053\uFF1A\u672A\u6302\u4E0A \u2014\u2014 \u73B0\u5728\u9760 5 \u79D2\u8F6E\u8BE2\u515C\u5E95");
+      lines.push(`\u6570\u636E\u8BFB\u53D6\uFF1A${fresh >= 0 ? fresh + " \u79D2\u524D" : "\u521A\u521A"}`);
+      lines.push(verify.ok ? verify.projects === 0 ? '\u6838\u5BF9\uFF1A\u8FD9\u6B21\u6CA1\u6709\u53EF\u6838\u5BF9\u7684\u9879\u76EE\uFF08\u660E\u7EC6\u8FD8\u6CA1\u62C9\u5168\uFF09\u2014\u2014 \u6240\u4EE5\u8FD9\u4E00\u884C\u4E0D\u7B97"\u5DF2\u6838\u5BF9"' : `\u6838\u5BF9\uFF1A\u4E00\u81F4\uFF08${verify.projects} \u4E2A\u9879\u76EE / ${verify.tasks} \u4E2A\u4EFB\u52A1\uFF09` + (verify.skipped ? `\uFF0C\u53E6\u6709 ${verify.skipped} \u4E2A\u660E\u7EC6\u6CA1\u62C9\u5168\u3001\u672A\u6838\u5BF9` : "") : `\u6838\u5BF9\uFF1A\u53D1\u73B0 ${verify.problems.length} \u5904\u5BF9\u4E0D\u4E0A\uFF08\u6838\u5BF9\u4E86 ${verify.projects} \u4E2A\u9879\u76EE\uFF09`);
+      for (const p of verify.problems.slice(0, 4)) lines.push("  \u26A0 " + p);
+      if (archivedProjects.length) {
+        lines.push(`\u53E6\u6709 ${archivedProjects.length} \u4E2A\u5DF2\u5F52\u6863\u672A\u663E\u793A\uFF08${archivedProjects.slice(0, 3).map((a) => a.key).join("\u3001")}${archivedProjects.length > 3 ? " \u2026" : ""}\uFF09`);
+      }
+      void logDbg("\u540C\u6B65\u62A5\u544A\uFF1A" + lines.join(" | ").slice(0, 600));
+      showSyncReport(lines, !verify.ok);
+    } catch (e) {
+      void logDbg("\u540C\u6B65\u5931\u8D25: " + String(e).slice(0, 300));
+      showSyncReport(["\u540C\u6B65\u5931\u8D25\uFF1A" + String(e).slice(0, 90), "\u539F\u59CB\u62A5\u9519\u5DF2\u5199\u8FDB\u8C03\u8BD5\u65E5\u5FD7"], true);
+    } finally {
+      syncing = false;
+      setTimeout(() => btn?.classList.remove("spinning"), 400);
+    }
+  }
+  async function verifyConsistency() {
+    const problems = [];
+    let taskTotal = 0;
+    let verified = 0;
+    let skipped = 0;
+    const scoped = view.kind === "tasks" ? [byKey(view.proj)].filter(Boolean) : ALL;
+    for (const p of scoped) {
+      if (!p.fromDb || !p.tasks.length) {
+        skipped++;
+        continue;
+      }
+      if (num(p.total) === 0) {
+        verified++;
+        continue;
+      }
+      taskTotal += num(p.total);
+      verified++;
+      const sum = num(p.done) + num(p.doing) + num(p.review) + num(p.ready) + heldOf(p) + num(p.failed);
+      if (sum !== num(p.total)) {
+        problems.push(p.name + "\uFF1A\u516D\u6876\u76F8\u52A0 " + sum + " \u2260 \u4EFB\u52A1\u603B\u6570 " + num(p.total));
+      }
+      const count = (f) => p.tasks.filter(f).length;
+      const tDone = count((t) => t.status === "done");
+      const tDoing = count((t) => t.status === "doing");
+      const tReview = count((t) => t.status === "review");
+      const tReady = count((t) => t.status === "ready");
+      const tBlocked = count((t) => t.status === "blocked");
+      if (tDone !== num(p.done)) problems.push(p.name + "\uFF1A\u5B8C\u6210\u6570 " + tDone + " \u2260 \u540E\u7AEF " + num(p.done));
+      if (tDoing !== num(p.doing)) problems.push(p.name + "\uFF1A\u5728\u505A\u6570 " + tDoing + " \u2260 \u540E\u7AEF " + num(p.doing));
+      if (tReview !== num(p.review)) problems.push(p.name + "\uFF1A\u5F85\u9A8C\u6536\u6570 " + tReview + " \u2260 \u540E\u7AEF " + num(p.review));
+      if (tReady !== num(p.ready)) problems.push(p.name + "\uFF1A\u5F85\u5F00\u59CB\u6570 " + tReady + " \u2260 \u540E\u7AEF " + num(p.ready));
+      if (tBlocked !== blockedOf(p)) problems.push(p.name + "\uFF1A\u5361\u4F4F\u6570 " + tBlocked + " \u2260 \u540E\u7AEF " + blockedOf(p));
+    }
+    return { ok: problems.length === 0, problems, projects: verified, tasks: taskTotal, skipped };
+  }
+  var syncReportEl = null;
+  var syncReportTimer = 0;
+  function showSyncReport(lines, sticky) {
+    if (!syncReportEl) {
+      syncReportEl = document.createElement("div");
+      syncReportEl.className = "sync-report";
+      syncReportEl.addEventListener("click", () => syncReportEl.classList.remove("show"));
+      document.body.appendChild(syncReportEl);
+    }
+    const [head, ...rest] = lines;
+    syncReportEl.innerHTML = `<div class="sr-head">${head}</div>` + rest.map((l) => `<div class="sr-line${l.startsWith("  \u26A0") ? " warn" : ""}">${l}</div>`).join("");
+    syncReportEl.classList.add("show");
+    clearTimeout(syncReportTimer);
+    if (!sticky) syncReportTimer = window.setTimeout(() => syncReportEl.classList.remove("show"), 2e3);
+  }
+  var syncBtn = document.getElementById("syncBtn");
+  if (syncBtn) {
+    syncBtn.addEventListener("click", () => {
+      void syncNow();
+    });
+  }
+  function parseState(raw) {
+    if (raw === null || raw === void 0) return {};
+    if (typeof raw === "object") return raw;
+    const s = String(raw).trim();
+    if (!s) return {};
+    try {
+      const o = JSON.parse(s);
+      return o && typeof o === "object" ? o : {};
+    } catch {
+      return {};
+    }
+  }
+  function toItems(v) {
+    if (v === null || v === void 0) return [];
+    if (Array.isArray(v)) return v.map(objToLine).filter((s2) => s2.trim());
+    if (typeof v === "object") return [objToLine(v)].filter((s2) => s2.trim());
+    const s = String(v).trim();
+    if (!s) return [];
+    const lines = s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    return lines.length > 1 ? lines : [s];
+  }
+  function objToLine(x) {
+    if (x === null || x === void 0) return "";
+    if (typeof x !== "object") return String(x);
+    const main = x.item ?? x.text ?? x.title ?? x.summary ?? x.note ?? x.what ?? "";
+    const detail = x.detail ?? x.description ?? x.why ?? "";
+    const rest = [];
+    for (const k of ["kind", "owner", "who", "status", "when", "file", "path"]) {
+      if (x[k] !== void 0 && x[k] !== null && String(x[k]).trim()) rest.push(`${k}=${x[k]}`);
+    }
+    const head = String(main).trim() || JSON.stringify(x);
+    const tail = detail ? ` \u2014\u2014 ${String(detail).trim()}` : "";
+    const meta = rest.length ? `\uFF08${rest.join(" \xB7 ")}\uFF09` : "";
+    return `${head}${meta}${tail}`;
+  }
+  var safeName = (s) => s.replace(/[\\/:*?"<>|\r\n]+/g, "-").replace(/\s+/g, " ").trim().slice(0, 60);
+  var esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  function clip(s, n) {
+    const t = String(s).trim();
+    if (t.length <= n) return t;
+    const cut = t.slice(0, n);
+    const m = /[。；！！？!?、,，\n][^。；！！？!?、,，\n]*$/.exec(cut);
+    const at = m ? cut.length - m[0].length + 1 : cut.length;
+    return cut.slice(0, at).replace(/[。；、,，\s]+$/, "") + "\u2026";
+  }
+  var today = () => {
+    const d = /* @__PURE__ */ new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  var STATUS_CN = {
+    done: "\u5DF2\u5B8C\u6210",
+    doing: "\u8FDB\u884C\u4E2D",
+    review: "\u5F85\u9A8C\u6536",
+    ready: "\u5F85\u5F00\u59CB",
+    blocked: "\u7B49\u5F85\u4E2D"
+  };
+  var st = (t) => STATUS_CN[t.status] || t.status;
+  function buildReportHtml(p, ckRows) {
+    const ck = /* @__PURE__ */ new Map();
+    for (const r of ckRows) {
+      const prev = ck.get(r.task_key);
+      if (!prev || String(r.at || "") > String(prev.at || "")) ck.set(r.task_key, r);
+    }
+    const doneItems = [];
+    const notDoneItems = [];
+    const blockers = [];
+    const nextItems = [];
+    const seen = /* @__PURE__ */ new Set();
+    const push = (arr, text, from) => {
+      const k = text.slice(0, 80);
+      if (seen.has(k)) return;
+      seen.add(k);
+      arr.push({ text, from });
+    };
+    for (const t of p.tasks) {
+      const row = ck.get(t.key);
+      const s = parseState(row?.state);
+      for (const x of toItems(s.completed)) push(doneItems, x, t.key);
+      for (const x of toItems(s.not_done)) push(notDoneItems, x, t.key);
+      for (const x of toItems(s.blockers)) push(blockers, x, t.key);
+      const nx = toItems(s.next_action);
+      for (const x of nx) push(nextItems, x, t.key);
+    }
+    for (const t of p.tasks) {
+      if (t.status !== "done" && t.nextAct) push(nextItems, t.nextAct, t.key);
+    }
+    const doing = p.tasks.filter((t) => t.status === "doing");
+    const review = p.tasks.filter((t) => t.status === "review");
+    const ready = p.tasks.filter((t) => t.status === "ready");
+    const blocked = p.tasks.filter((t) => t.status === "blocked");
+    const doneTasks = p.tasks.filter((t) => t.status === "done");
+    const taskTable = (list) => list.length ? `
+    <table>
+      <tr><th style="width:24%">\u4EFB\u52A1</th><th style="width:11%">\u72B6\u6001</th><th>\u8BF4\u660E / \u4E0B\u4E00\u6B65</th></tr>
+      ${list.map((t) => `<tr>
+        <td><b>${esc(t.key)}</b><div class="dim">${esc(t.title)}</div></td>
+        <td class="${t.status}">${st(t)}${t.owner ? `<div class="dim">${esc(t.owner)}</div>` : ""}</td>
+        <td>${t.desc ? `<div class="desc">${esc(clip(t.desc, 260))}</div>` : '<div class="dim">\u5E93\u91CC\u6CA1\u5199\u8BF4\u660E</div>'}
+            ${t.nextAct ? `<div class="na"><b>\u4E0B\u4E00\u6B65\uFF1A</b>${esc(clip(t.nextAct, 220))}</div>` : ""}
+            ${t.depends?.length ? `<div class="dim">\u524D\u7F6E\uFF1A${esc(t.depends[0])}${t.depends.length > 1 ? ` \u7B49 ${t.depends.length} \u9879` : ""}</div>` : ""}</td>
+      </tr>`).join("")}
+    </table>` : '<p class="dim">\uFF08\u65E0\uFF09</p>';
+    const bullets = (arr, empty) => arr.length ? `<ul>${arr.map((x) => `<li>${esc(x.text)}<span class="src">\u6765\u6E90\uFF1A${esc(x.from)}</span></li>`).join("")}</ul>` : `<p class="dim">${empty}</p>`;
+    return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>${esc(p.name)} \xB7 \u8FDB\u5EA6\u62A5\u544A</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; font-size: 10.5pt; color: #111; line-height: 1.75; margin: 0; }
+  h1 { font-size: 19pt; margin: 0 0 4px; letter-spacing: -.01em; }
+  .sub { color: #666; font-size: 9pt; margin-bottom: 16px; }
+  h2 { font-size: 12.5pt; margin: 20px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #ddd; }
+  h3 { font-size: 11pt; margin: 14px 0 6px; color: #333; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 10px; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 9.5pt; text-align: left; vertical-align: top; }
+  th { background: #f5f5f6; font-weight: 600; }
+  ul { margin: 4px 0 10px; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  .dim { color: #888; font-size: 9pt; }
+  .desc { color: #333; }
+  .na { margin-top: 4px; color: #1a4f8a; }
+  .src { color: #aaa; font-size: 8pt; margin-left: 6px; }
+  .done { color: #17a06b; font-weight: 600; }
+  .doing { color: #3b7ef6; font-weight: 600; }
+  .review { color: #8a6d1e; font-weight: 600; }
+  .ready { color: #777; }
+  .blocked { color: #c0392b; font-weight: 600; }
+  .kpi { display: flex; gap: 22px; margin: 10px 0 4px; padding: 10px 0; border-top: 1px solid #eee; border-bottom: 1px solid #eee; }
+  .kpi div { font-size: 9pt; color: #666; }
+  .kpi b { display: block; font-size: 16pt; color: #111; font-weight: 650; }
+  .note { margin-top: 18px; padding-top: 8px; border-top: 1px solid #eee; color: #999; font-size: 8.5pt; }
+</style></head><body>
+
+<h1>${esc(p.name)}</h1>
+<div class="sub">\u8FDB\u5EA6\u62A5\u544A \xB7 \u751F\u6210\u4E8E ${today()} \xB7 \u6570\u636E\u6765\u81EA\u5171\u4EAB\u9879\u76EE\u5E93</div>
+
+${p.scope ? `<p>${esc(p.scope)}</p>` : '<p class="dim">\uFF08\u5E93\u91CC\u6CA1\u5199\u8FD9\u4E2A\u9879\u76EE\u7684 scope\uFF09</p>'}
+${p.root ? `<p class="dim">\u4EE3\u7801\u76EE\u5F55\uFF1A${esc(p.root)}</p>` : ""}
+
+<div class="kpi">
+  <div><b>${p.done}/${p.total}</b>\u4EFB\u52A1\u5B8C\u6210</div>
+  <div><b>${p.doing}</b>\u8FDB\u884C\u4E2D</div>
+  <div><b>${p.review}</b>\u5F85\u9A8C\u6536</div>
+  <div><b>${p.ready}</b>\u5F85\u5F00\u59CB</div>
+  <div><b>${p.failed}</b>\u5361\u4F4F / \u5931\u8D25</div>
+  <div><b>${p.artifacts || 0}</b>\u4EA4\u4ED8\u4EA7\u51FA</div>
+  ${p.mapNodes ? `<div><b>${p.mapNodes}</b>\u4EE3\u7801\u6A21\u5757</div>` : ""}
+</div>
+
+<h2>\u96F6\u3001\u4EFB\u52A1\u76EE\u6807\u4E0E\u9A8C\u6536\u6807\u51C6</h2>
+${(() => {
+      const rows = p.tasks.map((t) => ({ t, c: parseContract(t.contract || "") })).filter((x) => x.c.goal || x.c.acceptance.length);
+      if (!rows.length) return '<p class="dim">\u5E93\u91CC\u8FD9\u4E9B\u4EFB\u52A1\u6CA1\u6709\u767B\u8BB0\u5408\u540C\uFF08\u76EE\u6807 / \u9A8C\u6536\u6807\u51C6\uFF09\u3002</p>';
+      return rows.map(({ t, c }) => `
+    <h3>${esc(t.title)}<span class="dim"> \xB7 ${esc(t.key)} \xB7 ${st(t)}</span></h3>
+    ${c.goal ? `<p><b>\u76EE\u6807\uFF1A</b>${esc(c.goal)}</p>` : ""}
+    ${c.acceptance.length ? `<ul>${c.acceptance.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : ""}
+  `).join("");
+    })()}
+
+<h2>\u4E00\u3001\u505A\u4E86\u4EC0\u4E48</h2>
+${bullets(doneItems, '\u5404\u4EFB\u52A1\u7684\u68C0\u67E5\u70B9\u91CC\u6CA1\u6709\u8BB0\u5F55"\u5DF2\u5B8C\u6210"\u7684\u6761\u76EE\u3002')}
+
+<h2>\u4E8C\u3001\u8FD8\u6CA1\u505A\u4EC0\u4E48</h2>
+${bullets(notDoneItems, '\u68C0\u67E5\u70B9\u91CC\u6CA1\u6709\u8BB0\u5F55"\u672A\u5B8C\u6210"\u7684\u6761\u76EE \u2014\u2014 \u4E0D\u4EE3\u8868\u6CA1\u6709\uFF0C\u53EF\u80FD\u662F\u6CA1\u5199\u8FDB\u68C0\u67E5\u70B9\u3002')}
+
+<h2>\u4E09\u3001\u5361\u5728\u54EA\u513F</h2>
+${blockers.length ? bullets(blockers, "") : '<p class="dim">\u68C0\u67E5\u70B9\u91CC\u6CA1\u6709\u8BB0\u5F55\u963B\u585E\u9879\u3002</p>'}
+${blocked.length ? `<h3>\u5E93\u91CC\u6807\u4E3A\u300C\u7B49\u5F85\u4E2D\u300D\u7684\u4EFB\u52A1</h3>${taskTable(blocked)}` : ""}
+
+<h2>\u56DB\u3001\u51C6\u5907\u505A\u4EC0\u4E48</h2>
+${review.length ? `<h3>\u5F85\u9A8C\u6536\uFF08\u7B49\u786E\u8BA4\uFF0C\u4E0D\u662F\u7B49\u81EA\u5DF1\u505A\uFF09</h3>${taskTable(review)}` : ""}
+${doing.length ? `<h3>\u6B63\u5728\u8FDB\u884C</h3>${taskTable(doing)}` : ""}
+${ready.length ? `<h3>\u5F85\u5F00\u59CB</h3>${taskTable(ready)}` : ""}
+${nextItems.length ? `<h3>\u5404\u4EFB\u52A1\u767B\u8BB0\u7684\u4E0B\u4E00\u6B65</h3>${bullets(nextItems, "")}` : ""}
+
+<h2>\u4E94\u3001\u5DF2\u7ECF\u5B8C\u6210\u7684\u4EFB\u52A1</h2>
+${taskTable(doneTasks)}
+
+<div class="note">
+  \u672C\u62A5\u544A\u7531\u300C\u5171\u4EAB\u9879\u76EE\u5E93\u300D\u60AC\u6D6E\u7403\u9762\u677F\u5BFC\u51FA\uFF0C\u5185\u5BB9\u5168\u90E8\u53D6\u81EA\u5171\u4EAB\u9879\u76EE\u5E93\uFF08PostgreSQL\uFF09\uFF0C\u672A\u505A\u4EBA\u5DE5\u6DA6\u8272\u3002<br>
+  \u4EFB\u52A1\u72B6\u6001\u3001\u8BF4\u660E\u3001\u4E0B\u4E00\u6B65\u6765\u81EA\u4EFB\u52A1\u8868\uFF1B\u300C\u505A\u4E86\u4EC0\u4E48 / \u8FD8\u6CA1\u505A / \u5361\u5728\u54EA\u513F\u300D\u6765\u81EA\u5404\u4F1A\u8BDD\u5199\u7684\u68C0\u67E5\u70B9\u3002<br>
+  \u5E93\u91CC\u7684\u5B57\u6BB5\u4E0D\u7EDF\u4E00\uFF08\u68C0\u67E5\u70B9\u7684 completed \u7B49\u5B57\u6BB5\u53EF\u80FD\u662F\u6570\u7EC4\u6216\u6574\u6BB5\u6587\u672C\uFF09\uFF0C\u5BFC\u51FA\u65F6\u5DF2\u7EDF\u4E00\u6210\u6761\u76EE\u5217\u51FA\u3002
+</div>
+</body></html>`;
+  }
+  async function exportProjectPdf(projKey, btn) {
+    const p = byKey(projKey);
+    if (!p) {
+      toast("\u627E\u4E0D\u5230\u8FD9\u4E2A\u9879\u76EE");
+      return;
+    }
+    btn?.classList.add("spinning");
+    try {
+      if (!p.fromDb || !p.tasks.length) {
+        await loadTasks(projKey);
+        if (open && view.kind === "tasks" && view.proj === projKey) renderTasks(projKey);
+      }
+      let ckRows = [];
+      try {
+        const raw = await invoke("qcheckpoints", { projectKey: projKey });
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) ckRows = parsed;
+      } catch (e) {
+        void logDbg('\u8BFB\u68C0\u67E5\u70B9\u5931\u8D25\uFF08\u62A5\u544A\u4F1A\u5C11"\u505A\u4E86\u4EC0\u4E48"\u90A3\u51E0\u8282\uFF09\uFF1A' + String(e).slice(0, 200));
+      }
+      const html = buildReportHtml(p, ckRows);
+      const dir = "D:\\codex-memory\\vault\\exports\\" + projKey;
+      const stamp = today().replace(/[: ]/g, "-");
+      const filename = `${safeName(p.name)}-\u8FDB\u5EA6-${stamp}`;
+      const pdf = await invoke("export_pdf", { html, dir, filename });
+      void logDbg("\u5BFC\u51FA\u6210\u529F: " + pdf);
+      try {
+        await invoke("open_file", { path: pdf });
+      } catch (e2) {
+        void logDbg("\u81EA\u52A8\u6253\u5F00\u5931\u8D25: " + String(e2).slice(0, 200));
+      }
+      setBotState("burst", clock);
+    } catch (e) {
+      void logDbg("\u5BFC\u51FA\u5931\u8D25: " + String(e).slice(0, 300));
+      showSyncReport(["\u5BFC\u51FA\u5931\u8D25", String(e).slice(0, 200), "\u539F\u59CB\u62A5\u9519\u5DF2\u5199\u8FDB\u8C03\u8BD5\u65E5\u5FD7"], true);
+    } finally {
+      setTimeout(() => btn?.classList.remove("spinning"), 400);
+    }
   }
 })();

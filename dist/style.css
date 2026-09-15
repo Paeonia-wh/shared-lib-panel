@@ -188,8 +188,50 @@ html, body {
    另加一个②果冻压扁 —— 那是这套设计里唯一还没用上的、适合小按钮的动效。
    （④粒子绽放没用在这里：球在复制成功时已经炸过一次，按钮再炸就重复了，
     而且标题栏只有 22px 高，粒子会飞出面板边界。） */
-.btn-req { position: relative; overflow: hidden; }
-/* ② 果冻：按下时图标沿 Y 轴压扁再回弹，形变跟着按下的方向走 */
+/* 同步按钮：点一下重读库 + 核对（只读，不写库）。
+   转圈表示正在同步 —— 它可能要点时间（重连通道 + 重读 + 核对）。 */
+.btn-sync.spinning .ic { animation: spinSync .8s linear infinite; }
+/* 导出按钮转圈也表示在做（拉检查点 + Edge 打 PDF，约 3~6 秒） */
+.card-copy.spinning .ic { animation: spinSync .8s linear infinite; }
+@keyframes spinSync { to { transform: rotate(360deg); } }
+
+/* 同步报告：底部弹层（和 toast 同一区域，但能放多行）。
+   用户 2026-09-15 定的四条：
+     · 别用黑底 —— 用白（和卡片同一套白 + 细线，符合本项目的设计语言）
+     · 别突然出现 —— 要"绽放"出来的感觉：从底部中心往上张开
+     · 2 秒就收（原来是 6 秒）
+   核对发现问题时不自动收（sticky），点一下可以手动关掉。 */
+.sync-report {
+  position: fixed; left: 50%; bottom: 38px;
+  background: #fff;
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+  font-size: 11.5px; font-weight: 450; line-height: 1.62;
+  padding: 11px 15px;
+  border-radius: var(--r-md);
+  max-width: min(420px, calc(100vw - 40px));
+  opacity: 0; pointer-events: none; z-index: 60;
+  /* 收起来：往下缩、淡出 */
+  transform: translate(-50%, 10px) scale(.9);
+  transform-origin: 50% 100%;          /* 从底部中心张开 */
+  transition: opacity .18s ease, transform .2s cubic-bezier(.34,1.56,.64,1);
+  cursor: pointer;
+}
+/* 绽放：向上张开并轻微过冲（借本项目「⑨ 层叠抽卡」的那条动效曲线） */
+.sync-report.show {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+  pointer-events: auto;
+  animation: reportBloom .34s cubic-bezier(.34,1.4,.5,1);
+}
+@keyframes reportBloom {
+  0%   { transform: translate(-50%, 12px) scale(.84); opacity: 0; }
+  60%  { transform: translate(-50%, -2px) scale(1.028); opacity: 1; }
+  100% { transform: translate(-50%, 0) scale(1); opacity: 1; }
+}
+.sync-report .sr-head { font-weight: 650; font-size: 12.5px; margin-bottom: 3px; color: var(--ink); }
+.sync-report .sr-line { color: var(--ink-2); }
+.sync-report .sr-line.warn { color: var(--amber); font-weight: 600; }/* ② 果冻：按下时图标沿 Y 轴压扁再回弹，形变跟着按下的方向走 */
 .btn-req.press .ic { animation: jellyIcon .34s cubic-bezier(.34,1.56,.64,1); }
 @keyframes jellyIcon {
   0%   { transform: scaleY(1)   scaleX(1); }
@@ -436,6 +478,13 @@ html, body {
      ③ 面板本来就走"安静"路线，四个黑块竖着一列太吵。
    改成和 .tcopy 完全一致的幽灵按钮：白底 + 细线 + 深字，悬停才翻成实心。
    尺寸也收了：字号 11→10.5，内边距 7×11 → 5×9，圆角落到 --r-sm。 */
+/* 按钮竖着排（2026-09-15 用户截图反馈：横排时「复制现状简报」压住了右边的
+   "13 待开始"和时间，所以把两个按钮改成上下排）。窄卡片横排放不下两个带字的按钮。 */
+.card-acts {
+  display: flex; flex-direction: column; gap: 4px;
+  flex: none; align-items: stretch; align-self: center;
+}
+.card-acts .card-copy.always { width: 100%; }
 .card-copy.always {
   position: static; flex: none;
   opacity: 1; transform: none;
@@ -546,4 +595,12 @@ body.tauri .desk { display: none !important; }
   background: radial-gradient(closest-side, rgba(11,11,14,.36), transparent 72%);
   filter: blur(3.5px);
   z-index: 0;
+}
+
+/* 可疑状态提示（2026-09-15 加）：占着没推进 / 逾期没交。
+   用 amber 而不是红 —— 它不是失败，是"该问一句了"。
+   设计上跟既有的 meta-ready 同一套：小字、不抢视线，但看得见。 */
+.meta-warn {
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
 }

@@ -123,7 +123,10 @@ async fn start_event_stream(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
 
     let token = shared_token()?;
-    let logpath = std::path::PathBuf::from(r"D:\codex\shared-lib-panel\debug.log");
+    /* 日志跟着 exe 走（见 log_path() 的说明）—— 原来写死 D:\codex\shared-lib-panel\debug.log，
+       而用 tauri dev / build.ps1 跑时 exe 在 target\debug\ 下，日志却写到源码目录，
+       排查时看的根本不是同一份文件。 */
+    let logpath = log_path();
     let say = move |m: String| {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&logpath) {
@@ -173,11 +176,34 @@ fn pg_connect() -> Result<postgres::Client, String> {
     cfg.connect(postgres::NoTls).map_err(|e| format!("PG连接失败: {e}"))
 }
 
+/// debug.log 的路径 —— **跟着 exe 走，不写死**。
+///
+/// 为什么（2026-09-15 改，这是用户最初报的那个 bug 的根因）：
+/// 原来三处日志全写死 `D:\codex\shared-lib-panel\debug.log`。
+/// 但用 `npm run tauri dev` 跑的是 `src-tauri\target\debug\shared-lib-panel.exe`，
+/// 用 build.ps1 跑的是同一个 target 下的 exe —— 而**日志却写到源码目录**。
+/// 结果：用户看到的现象是「UI 改了没生效 / 日志对不上」，
+/// 排查方向全被带偏（我今天也在这上面绕过一圈）。
+///
+/// 现在：日志固定在 **exe 所在目录**旁边。
+///  - 部署形态：exe 在 target\debug\，日志就在那儿
+///  - 打包分发：跟着安装目录走，不会去写用户的 D 盘源码目录
+///  - 开源用户：不需要有 `D:\codex\shared-lib-panel` 这个目录才能记日志
+pub fn log_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("debug.log")))
+        .unwrap_or_else(|| std::path::PathBuf::from("debug.log"))
+}
+
 /// 写一行到 debug.log（Rust 侧排查用）
 fn rlog(msg: &str) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-        .open(r"D:\codex\shared-lib-panel\debug.log") {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+    {
         let _ = writeln!(f, "[rust] {msg}");
     }
 }
@@ -188,40 +214,162 @@ async fn qdata() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut conn = pg_connect()?;
                 let sql = r#"
+            /* 五桶口径必须和前端的状态映射**完全一致**，否则面板的"深度核对"每次都报对不上
+               （2026-09-15 用户截图里那 3 处不一致就是这么来的：后端 doing 还说"有主就算在做"，
+               而前端徽章已经改用"占用者心跳还新"）。
+
+               结构上有个坑：不能在项目表那个 GROUP BY 里直接加 os.last_heartbeat ——
+               一个项目的多个任务 owner 不同、心跳时间就不同，会被拆成多行
+               （实测 kstage 出现 3 次、longan-farm 6 次）。所以先用 CTE 按 project_id
+               聚合（严格一对一），再 JOIN 项目表。 */
+            WITH bucket AS (
+                SELECT t.project_id,
+                       count(*)::int AS total,
+                       count(*) FILTER (WHERE t.status = 'done')::int AS done,
+                       /* 在做 = 标了 running 的，或有主且占用者心跳还新（2 小时内）的。
+                          有主≠在做：陈旧的认领（占用者早没了）不该算。 */
+                       count(*) FILTER (WHERE t.status = 'running'
+                                          OR (t.status = 'pending' AND os.id IS NOT NULL
+                                              AND os.last_heartbeat IS NOT NULL
+                                              AND os.last_heartbeat > now() - interval '2 hours'))::int AS doing,
+                       /* ---- liveness / progress 双租约（2026-09-15 加）----
+                          为什么拆开：原来只有一个 lease + 一个 last_heartbeat，两件事挤在一起，
+                          "心跳新但没产出"和"心跳旧但有产出"分不开 ——
+                          面板判「在不在干」为此改过 5 轮都不准。
+                          出处（hermes-agent 的修复提交标题原文）：
+                              fix(kanban): separate worker progress from liveness
+                          分工：liveness_until 由心跳续；progress_at 由检查点/产出更新。
+                          ⚠ 老行这两个字段为 NULL，所以判据里 COALESCE 兜底到旧语义
+                          （旧语义 = lease_until / updated_at）。 */
+                       count(*) FILTER (WHERE t.status <> 'done'
+                                          AND COALESCE(t.liveness_until, t.lease_until) > now())::int AS live_tasks,
+                       /* 占着但没推进 = 磨洋工 / 卡住。这是双租约最有价值的一格：
+                          原来它和「在推进」混在同一个字段里，谁都看不出来。 */
+                       count(*) FILTER (WHERE t.status <> 'done'
+                                          AND COALESCE(t.liveness_until, t.lease_until) > now()
+                                          AND COALESCE(t.progress_at, t.updated_at)
+                                              <= now() - interval '1 hour')::int AS stalled_tasks,
+                       /* 逾期：会话声明过 ETA，现在过了 —— 该问一句了（不是「催」，是「问」）。
+                          出处 HYTHE/ACP：「固定轮询要么太吵要么太瞎」，
+                          所以让会话自己报 ETA，面板在 ETA 之前不打扰。 */
+                       count(*) FILTER (WHERE t.status <> 'done'
+                                          AND t.eta_until IS NOT NULL
+                                          AND t.eta_until < now())::int AS overdue_eta,
+                       count(*) FILTER (WHERE t.status = 'review')::int AS review,
+                       /* 没闲着 = blocked/failed/cancelled 且**没有活的认领**的
+                          （有活认领的已经被上面算进"在做"了，不能再算一次 —— 会重复计数） */
+                       count(*) FILTER (WHERE t.status IN ('blocked','failed','cancelled')
+                                          AND (os.id IS NULL
+                                               OR os.last_heartbeat IS NULL
+                                               OR os.last_heartbeat <= now() - interval '2 hours'))::int AS stuck,
+                       /* 待开始 = 其余 pending。不能写成 owner IS NULL ——
+                          那会让"有陈旧占位的 pending 任务"既不算在做也不算待开始，
+                          凭空消失（实测农业局因此少算一个任务）。 */
+                       /* 待开始 = pending、没有未完成前置、也没有活认领。
+                          「未完成前置」必须算进来 —— 前端的状态映射里
+                          (unmet_deps > 0 → 被卡住)，后端不算就会和前端对不上
+                          （2026-09-15 实测 rebuild-ui-assets-294 差 1 个）。 */
+                       count(*) FILTER (WHERE t.status = 'pending'
+                                          AND unmet.n = 0
+                                          AND NOT (os.id IS NOT NULL
+                                                   AND os.last_heartbeat IS NOT NULL
+                                                   AND os.last_heartbeat > now() - interval '2 hours'))::int AS ready,
+                       /* 等前置 = pending 但有未完成的前置（前端显示成「被卡住」） */
+                       count(*) FILTER (WHERE t.status = 'pending'
+                                          AND unmet.n > 0
+                                          AND NOT (os.id IS NOT NULL
+                                                   AND os.last_heartbeat IS NOT NULL
+                                                   AND os.last_heartbeat > now() - interval '2 hours'))::int AS held
+                FROM agent_tasks t
+                LEFT JOIN agent_sessions os ON os.id = t.owner_session_id
+                /* 每个任务的未完成前置数。用子查询而不是再 JOIN 一次依赖表，
+                   避免依赖表把行数放大（一个任务多个前置会产生多行）。 */
+                LEFT JOIN LATERAL (
+                    SELECT count(*)::int AS n
+                    FROM agent_task_dependencies d
+                    JOIN agent_tasks dp ON dp.id = d.depends_on_task_id
+                    WHERE d.task_id = t.id AND dp.status <> 'done'
+                ) unmet ON TRUE
+                GROUP BY t.project_id
+            )
             SELECT p.project_key, p.name, p.kind, p.control_state, p.tags::text AS tags,
                    COALESCE(p.scope, '') AS scope,
                    COALESCE(p.root_path, '') AS root_path,
                    to_char(p.updated_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD"T"HH24:MI:SS') AS updated_at,
-                   count(t.id)::int AS total,
-                   count(*) FILTER (WHERE t.status = 'done')::int AS done,
-                   count(*) FILTER (WHERE t.status = 'pending' AND t.owner_session_id IS NULL)::int AS ready,
-                   /* 在做 = 标了 running 的（不管有没有主）+ 有主且未完成的。
-                      原来只写了后半句，于是"标了 running 但还没认领"的任务不计入在做，
-                      面板的进度数字会和任务卡自相矛盾 —— 平台的白名单里 running 是合法值。 */
-                   count(*) FILTER (WHERE t.status = 'running'
-                                      OR (t.owner_session_id IS NOT NULL AND t.status <> 'done'))::int AS doing,
-                   /* 待验收（review）单独一档，不算待开始也不算在做 —— 它是等别人验，不是等自己做 */
-                   count(*) FILTER (WHERE t.status = 'review')::int AS review,
-                   /* 没闲着 = 平台白名单里剩下那些（blocked / failed / cancelled）**且没有主**。
-                      两个要点：
-                      ① 原来只统计 failed|cancelled，于是 blocked 的任务不属于任何一桶 ——
-                         16 个任务只算到 15 个，进度数字和任务卡自相矛盾（实测 rural-1-39 撞到）。
-                      ② 必须排掉"有主"的，否则和上面「在做」重叠：一个 blocked 且有主的任务
-                         会被两边各算一次（实测算出 17 > 总数 16）。
-                      加上 owner IS NULL 后五桶严格互斥且完备：
-                         done(任意) + doing(running 或有主未完成) + review + ready + failed(无主的其余) = total */
-                   count(*) FILTER (WHERE t.status IN ('blocked','failed','cancelled')
-                                      AND t.owner_session_id IS NULL)::int AS failed,
+                   COALESCE(b.total, 0) AS total,
+                   COALESCE(b.done, 0) AS done,
+                   COALESCE(b.ready, 0) AS ready,
+                   COALESCE(b.doing, 0) AS doing,
+                   COALESCE(b.live_tasks, 0) AS live_tasks,
+                   COALESCE(b.stalled_tasks, 0) AS stalled_tasks,
+                   COALESCE(b.overdue_eta, 0) AS overdue_eta,
+                   COALESCE(b.review, 0) AS review,
+                   COALESCE(b.stuck, 0) AS failed,
+                   COALESCE(b.held, 0) AS held,
                    (SELECT count(*) FROM agent_code_nodes n WHERE n.project_id = p.id)::int AS map_nodes,
                    (SELECT count(*) FROM agent_code_edges e WHERE e.project_id = p.id)::int AS map_edges,
                    (SELECT count(*) FROM agent_artifacts a WHERE a.project_id = p.id)::int AS artifacts,
+                   /* 该项目里「还活着的认领」数量：任务有主、且占用者的心跳还新。
+                      平台自己是用租约/心跳判断认领是否有效的，面板得跟着用。 */
+                   (SELECT count(*) FROM agent_tasks t2
+                      JOIN agent_sessions s2 ON s2.id = t2.owner_session_id
+                     WHERE t2.project_id = p.id AND t2.status <> 'done'
+                       AND s2.last_heartbeat IS NOT NULL
+                       AND s2.last_heartbeat > now() - interval '2 hours')::int AS live_claims,
+                   /* 有主但占用者早就不动了的（面板显示"被 X 占着，N 小时没动"，不当作在做） */
+                   (SELECT count(*) FROM agent_tasks t3
+                      LEFT JOIN agent_sessions s3 ON s3.id = t3.owner_session_id
+                     WHERE t3.project_id = p.id AND t3.status <> 'done'
+                       AND t3.owner_session_id IS NOT NULL
+                       AND (s3.last_heartbeat IS NULL
+                            OR s3.last_heartbeat <= now() - interval '2 hours'))::int AS stale_claims,
+                   /* 最新一次心跳距今多少分钟 */
+                   COALESCE((SELECT floor(extract(epoch FROM (now() - max(s4.last_heartbeat))) / 60)::int
+                               FROM agent_sessions s4 WHERE s4.project_id = p.id
+                              AND s4.last_heartbeat IS NOT NULL), -1) AS last_beat_min,
+                   /* 项目级活动新鲜度：任务更新 / 检查点 / 产出 / 会话心跳里最新的那个。
+                      为什么要它：任务状态看不出"有人刚接手但还没领任务"——
+                      kstage 就出现过（会话 62 分钟前刚登记、61 分钟前写了检查点，
+                      但所有任务都是 done/pending，面板会误判成"待开始"）。
+                      注意：不要用 '-infinity'::timestamptz 兜底 —— 它没法和 int 互转
+                      （Postgres 报 "cannot convert infinity to integer"）；max() 自己会忽略 NULL。 */
+                   COALESCE(
+                     floor(extract(epoch FROM (now() - GREATEST(
+                       (SELECT max(t9.updated_at)      FROM agent_tasks       t9 WHERE t9.project_id = p.id),
+                       (SELECT max(c9.created_at)      FROM agent_checkpoints c9 WHERE c9.project_id = p.id),
+                       (SELECT max(a9.created_at)      FROM agent_artifacts   a9 WHERE a9.project_id = p.id)
+                     ))) / 60)::int,
+                     -1
+                   ) AS last_activity_min,
+                   /* 只看「有人真的干了活」的证据：检查点或产出。
+                      为什么把 agent_events 和 last_heartbeat 排除在外（2026-09-15 踩到）：
+                      ① 事件里混着系统噪声（清理陈旧认领、自动同步、基线抓取、地图更新）——
+                         我清理一个陈旧占位时写的那条 task_lease_expired，当场让
+                         rural-1-39 显示成"进行中"，用户立刻发现了；
+                      ② 心跳目前不是可靠信号：库里心跳类事件总数是 0，
+                         last_heartbeat 只在登记会话时写一次，之后不再更新。
+                      所以"在不在干活"只认这两个：会话主动记的检查点、会话发布的产出。 */
+                   COALESCE(
+                     floor(extract(epoch FROM (now() - GREATEST(
+                       (SELECT max(c8.created_at) FROM agent_checkpoints c8 WHERE c8.project_id = p.id),
+                       (SELECT max(a8.created_at) FROM agent_artifacts   a8 WHERE a8.project_id = p.id)
+                     ))) / 60)::int,
+                     -1
+                   ) AS last_work_min,
+                   /* 心跳还新的会话数（"有人在干"最直接的证据） */
+                   (SELECT count(*) FROM agent_sessions s5
+                     WHERE s5.project_id = p.id AND s5.last_heartbeat IS NOT NULL
+                       AND s5.last_heartbeat > now() - interval '2 hours')::int AS live_sessions,
                    (SELECT count(*) FROM agent_sessions s WHERE s.project_id = p.id)::int AS sessions,
-                   /* 最新任务时间（无任务时给空串）。前端指纹要比它 —— 见下面 json 里的注释。 */
-                   COALESCE(to_char((SELECT max(t2.updated_at) FROM agent_tasks t2 WHERE t2.project_id = p.id)
+                   /* 检查点数：唯一记录"过程"的量 —— 一个任务里干了几轮、踩了哪些坑 */
+                   (SELECT count(*) FROM agent_checkpoints ck WHERE ck.project_id = p.id)::int AS checkpoints,
+                   (SELECT count(*) FROM agent_task_contracts tc WHERE tc.project_id = p.id)::int AS contracts,
+                   /* 最新任务时间（无任务时给空串）。前端指纹要比它。 */
+                   COALESCE(to_char((SELECT max(t8.updated_at) FROM agent_tasks t8 WHERE t8.project_id = p.id)
                                     AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD"T"HH24:MI:SS'), '') AS task_updated_at
             FROM agent_projects p
-            LEFT JOIN agent_tasks t ON t.project_id = p.id
-            GROUP BY p.id, p.project_key, p.name, p.kind, p.control_state, p.tags, p.scope, p.root_path, p.updated_at
+            LEFT JOIN bucket b ON b.project_id = p.id
+            WHERE p.control_state <> 'archived'
             ORDER BY p.control_state, p.project_key
         "#;
         let rows = conn.query(sql, &[]).map_err(|e| { rlog(&format!("查询失败: {e}")); format!("查询失败: {e}") })?;
@@ -242,10 +390,22 @@ async fn qdata() -> Result<String, String> {
                 "doing": r.get::<_, i32>("doing"),
                 "review": r.get::<_, i32>("review"),
                 "failed": r.get::<_, i32>("failed"),
+                "held": r.get::<_, i32>("held"),
                 "map_nodes": r.get::<_, i32>("map_nodes"),
                 "map_edges": r.get::<_, i32>("map_edges"),
                 "artifacts": r.get::<_, i32>("artifacts"),
                 "sessions": r.get::<_, i32>("sessions"),
+                "last_activity_min": r.get::<_, i32>("last_activity_min"),
+                "last_work_min": r.get::<_, i32>("last_work_min"),
+                "live_sessions": r.get::<_, i32>("live_sessions"),
+                "live_claims": r.get::<_, i32>("live_claims"),
+                "live_tasks": r.get::<_, i32>("live_tasks"),
+                "stalled_tasks": r.get::<_, i32>("stalled_tasks"),
+                "overdue_eta": r.get::<_, i32>("overdue_eta"),
+                "stale_claims": r.get::<_, i32>("stale_claims"),
+                "last_beat_min": r.get::<_, i32>("last_beat_min"),
+                "checkpoints": r.get::<_, i32>("checkpoints"),
+                "contracts": r.get::<_, i32>("contracts"),
                 /* 该项目下最新的任务更新时间。给前端的指纹比对用：
                    只含计数的话，改了任务说明/状态（而计数没变）面板会判定"没变化"而不重绘。 */
                 "task_updated_at": r.get::<_, String>("task_updated_at"),
@@ -268,6 +428,14 @@ async fn qtasks(project_key: String) -> Result<String, String> {
                    COALESCE(t.owner_session_id, '') AS owner,
                    COALESCE(t.description, '') AS description,
                    COALESCE(t.next_action, '') AS next_action,
+                   /* 占用者的认领还算不算数 —— 面板据此不把"23 小时前的占位"当成"在做"。
+                      ⚠ 口径必须和 qdata 的 live_claims 完全一致（心跳在 2 小时内），
+                      否则项目徽章说"待开始"、任务卡却说"进行中"，自相矛盾。
+                      第一版只判断了"有没有心跳记录"（IS NOT NULL），把 1388 分钟前的
+                      占位也判成"活"，等于没修 —— 2026-09-15 自己踩到并改正。 */
+                   (os.last_heartbeat IS NOT NULL
+                    AND os.last_heartbeat > now() - interval '2 hours') AS owner_alive,
+                   COALESCE(floor(extract(epoch FROM (now() - os.last_heartbeat)) / 60)::int, -1) AS owner_beat_min,
                    (SELECT count(*) FROM agent_task_dependencies d WHERE d.task_id = t.id)::int AS deps,
                    /* 未完成的前置数：只有它才代表"真的被卡住"。
                       原来的 deps（总前置数）会让"前置全做完"的任务永远显示成等待中
@@ -277,8 +445,12 @@ async fn qtasks(project_key: String) -> Result<String, String> {
                      WHERE d.task_id = t.id AND dp.status <> 'done')::int AS unmet_deps,
                    (SELECT string_agg(dp.task_key, ', ') FROM agent_task_dependencies d
                       JOIN agent_tasks dp ON dp.id = d.depends_on_task_id
-                     WHERE d.task_id = t.id) AS dep_keys
+                     WHERE d.task_id = t.id) AS dep_keys,
+                   cc.contract::text AS contract_text,
+                   COALESCE(cc.created_by, '') AS contract_by
             FROM agent_tasks t JOIN agent_projects p ON p.id = t.project_id
+            LEFT JOIN agent_task_contracts cc ON cc.task_id = t.id
+            LEFT JOIN agent_sessions os ON os.id = t.owner_session_id
             WHERE p.project_key = $1
             ORDER BY CASE t.status WHEN 'pending' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
                      t.priority, t.task_key
@@ -293,9 +465,16 @@ async fn qtasks(project_key: String) -> Result<String, String> {
                 "owner": r.get::<_, String>("owner"),
                 "description": r.get::<_, String>("description"),
                 "next_action": r.get::<_, String>("next_action"),
+                "owner_alive": r.get::<_, bool>("owner_alive"),
+                "owner_beat_min": r.get::<_, i32>("owner_beat_min"),
                 "deps": r.get::<_, i32>("deps"),
                 "unmet_deps": r.get::<_, i32>("unmet_deps"),
                 "dep_keys": r.get::<_, Option<String>>("dep_keys").unwrap_or_default(),
+                /* 合同（活的目标与验收标准）：任务标题和说明是创建时写死的、改不了；
+                   范围发生变化时靠合同表达 —— 平台只能改合同（走提案+审批）。
+                   面板原来完全没查这张表，所以用户看不到"这件事现在到底要求什么"（2026-09-15 补）。 */
+                "contract": r.get::<_, Option<String>>("contract_text").unwrap_or_default(),
+                "contract_by": r.get::<_, String>("contract_by"),
             })
         }).collect();
         serde_json::to_string(&out).map_err(|e| e.to_string())
@@ -304,6 +483,140 @@ async fn qtasks(project_key: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// 某个项目的检查点明细（每个任务**最新一条**）—— 导出进度报告用
+///
+/// 为什么需要它（2026-09-15 用户要"导出详细进度报告"）：
+/// "做了什么 / 没做什么 / 准备做什么"这三样**不在任务表里**，
+/// 而在检查点的 state 里（completed / not_done / next_action）。
+/// 面板一直没读过检查点，所以导出要拉一次。
+///
+/// 只读 SELECT，不加锁、不写任何表 —— 和正在干活的会话不会冲突。
+/// 注意：state 里那五个字段**类型不统一**（有时是数组、有时是整段字符串、有时是 null），
+/// 所以这里原样把 jsonb 交给前端，由前端归一化（别在这里假装它是数组）。
+#[tauri::command]
+async fn qcheckpoints(project_key: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = pg_connect()?;
+        let sql = r#"
+            SELECT t.task_key, c.state_text, c.at,
+                   COALESCE(t.description, '') AS description,
+                   COALESCE(t.next_action, '') AS next_action
+            FROM agent_tasks t
+            JOIN agent_projects p ON p.id = t.project_id
+            LEFT JOIN LATERAL (
+                SELECT state::text AS state_text,
+                       /* timestamptz 要在 SQL 里转文本：Rust 侧按 String 取会报笼统的 db error
+                          （qdata 里用 to_char 也是同一个原因）。 */
+                       COALESCE(to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'), '') AS at
+                FROM agent_checkpoints
+                WHERE task_id = t.id ORDER BY created_at DESC LIMIT 1
+            ) c ON TRUE
+            WHERE p.project_key = $1
+            ORDER BY t.priority, t.task_key
+        "#;
+        let rows = conn.query(sql, &[&project_key]).map_err(|e| format!("查询失败: {e}"))?;
+        let out: Vec<serde_json::Value> = rows.iter().map(|r| {
+            let state: Option<String> = r.get("state_text");
+            serde_json::json!({
+                "task_key": r.get::<_, String>("task_key"),
+                "description": r.get::<_, String>("description"),
+                "next_action": r.get::<_, String>("next_action"),
+                "state": state,
+                /* 没有检查点的任务，at 是 NULL —— 必须按 Option 取，否则取 NULL 会报错 */
+                "at": r.get::<_, Option<String>>("at").unwrap_or_default(),
+            })
+        }).collect();
+        serde_json::to_string(&out).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 导出进度报告。
+///
+/// 分两步：先把 HTML 写到文件（前端生成好内容传进来），再用 **Edge 无头**把它打成 PDF。
+/// 为什么用 Edge 而不是 Rust 里的 PDF 库：PDF 要内嵌 Chromium 级别的渲染引擎，
+/// 几百 MB 的依赖为一个按钮不值得；而这台机器自带 Edge 153，`--print-to-pdf` 实测 5 秒出件。
+/// （Word 那条路实测不行：Word COM 调用会卡死，所以不做 .docx。）
+/// 返回 PDF 的绝对路径。
+#[tauri::command]
+async fn export_pdf(html: String, dir: String, filename: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::process::Command;
+        let base = std::path::PathBuf::from(&dir);
+        std::fs::create_dir_all(&base).map_err(|e| format!("建目录失败 {dir}: {e}"))?;
+        let html_path = base.join(format!("{filename}.html"));
+        std::fs::write(&html_path, html.as_bytes()).map_err(|e| format!("写 HTML 失败: {e}"))?;
+        let pdf_path = base.join(format!("{filename}.pdf"));
+
+        // 找 Edge（装的位置有两处常见路径），找不到再试 Chrome
+        let candidates = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ];
+        let exe = candidates.iter().find(|p| std::path::Path::new(p).exists())
+            .ok_or_else(|| "没找到 Edge 或 Chrome，无法生成 PDF".to_string())?;
+
+        let url = format!("file:///{}", html_path.to_string_lossy().replace('\\', "/"));
+        let out = Command::new(exe)
+            .args([
+                "--headless=new",
+                "--disable-gpu",
+                "--no-pdf-header-footer",       // 不要页眉页脚（别把 file:// 路径印上去）
+                "--print-to-pdf-no-header",
+                &format!("--print-to-pdf={}", pdf_path.to_string_lossy()),
+                &url,
+            ])
+            .output()
+            .map_err(|e| format!("调 Edge 失败: {e}"))?;
+        if !pdf_path.exists() {
+            return Err(format!(
+                "Edge 没生成 PDF。stdout={} stderr={}",
+                String::from_utf8_lossy(&out.stdout).chars().take(300).collect::<String>(),
+                String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>(),
+            ));
+        }
+        Ok(pdf_path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 用系统默认程序打开一个文件（导出后自动打开 PDF 用）。
+///
+/// 为什么不走 tauri-plugin-opener 的 open_path：那个要配 opener 的 **scope**，
+/// 而导出目录是 `D:\codex-memory\vault\exports\<项目key>\` —— 每个项目一个子目录，
+/// 没法在 capabilities 里穷举。实测报 "Not allowed to open path ..."。
+/// 自己写个命令最省事：Rust 侧调用进程不受前端权限体系约束。
+#[tauri::command]
+fn open_file(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("文件不存在: {path}"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        /* CREATE_NO_WINDOW：别弹黑框（这台机器上用户明确要求过不能出现黑框）。 */
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| format!("打开失败: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        std::process::Command::new(opener)
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("打开失败: {e}"))?;
+        Ok(())
+    }
+}
 /// 给前端用的 SSE 地址（EventSource 不能带 header，所以 token 走 query）
 #[tauri::command]
 fn events_url() -> Result<String, String> {
@@ -315,8 +628,9 @@ fn events_url() -> Result<String, String> {
 #[tauri::command]
 fn debug_log(msg: String) {
     use std::io::Write;
-    let path = std::path::Path::new("D:\\codex\\shared-lib-panel\\debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    /* 原来写死 D:\codex\shared-lib-panel\debug.log —— 改成跟着 exe 走，
+       免得用 tauri dev 跑时日志落到源码目录、和实际运行的那份对不上。 */
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path()) {
         let _ = writeln!(f, "{}", msg);
     }
 }
@@ -343,17 +657,18 @@ fn main() {
         let msg = format!("PANIC: {info}");
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open(r"D:\codex\shared-lib-panel\debug.log") {
+            .open(log_path()) {
             let _ = writeln!(f, "[rust] {msg}");
         }
     }));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--silent"]),
         ))
-        .invoke_handler(tauri::generate_handler![qdata, qtasks, move_window, set_click_through, debug_log, call_shared_tool, events_url, start_event_stream])
+        .invoke_handler(tauri::generate_handler![qdata, qtasks, qcheckpoints, export_pdf, open_file, move_window, set_click_through, debug_log, call_shared_tool, events_url, start_event_stream])
         .setup(|app| {
             // ---- 强制不进任务栏 ----
             // 窗口创建流程会把 skipTaskbar 重置回去，所以启动后再补设几次
