@@ -4337,6 +4337,7 @@
       ready: r.ready,
       doing: r.doing,
       failed: r.failed,
+      review: num(r.review),
       kind: r.kind,
       isTest: isTestish(r.project_key, r.name || ""),
       ctrl: r.control_state,
@@ -4344,7 +4345,8 @@
       mapNodes: r.map_nodes,
       mapEdges: r.map_edges,
       artifacts: r.artifacts,
-      sessions: r.sessions
+      sessions: r.sessions,
+      taskUpdatedAt: String(r.task_updated_at || "")
     }));
     const live = items.filter((r) => !r.isTest);
     const test = items.filter((r) => r.isTest);
@@ -4355,7 +4357,16 @@
     ].filter((g) => g.items.length > 0);
     rebuildAll();
     everLoaded = true;
-    const fp = JSON.stringify(items.map((r) => [r.key, r.total, r.done, r.ready, r.doing, r.failed, r.ago]));
+    const fp = JSON.stringify(items.map((r) => [
+      r.key,
+      r.total,
+      r.done,
+      r.ready,
+      r.doing,
+      r.failed,
+      r.ago,
+      r.taskUpdatedAt
+    ]));
     if (fp === lastFingerprint) return;
     lastFingerprint = fp;
     if (open) renderProjects();
@@ -4370,7 +4381,7 @@
       p.tasks = rows.map((t) => ({
         key: t.key,
         title: t.title || t.key,
-        status: t.status === "done" ? "done" : t.status === "failed" || t.status === "cancelled" ? "blocked" : t.status === "blocked" ? "blocked" : t.owner ? "doing" : t.unmet_deps > 0 ? "blocked" : "ready",
+        status: t.status === "done" ? "done" : t.status === "failed" || t.status === "cancelled" ? "blocked" : t.status === "blocked" ? "blocked" : t.status === "running" ? "doing" : t.status === "review" ? "review" : t.owner ? "doing" : t.unmet_deps > 0 ? "blocked" : "ready",
         raw: t.status,
         pri: typeof t.priority === "number" ? t.priority : 9,
         owner: t.owner ? String(t.owner).replace(/^session-/, "").slice(0, 12) : void 0,
@@ -4416,24 +4427,27 @@
     }
   }
   var lastFingerprint = "";
+  var libraryDirty = false;
   var num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
   var totalOf = (p) => num(p.total);
   var doneOf = (p) => num(p.done);
   var readyOf = (p) => num(p.ready);
   var doingOf = (p) => num(p.doing);
   var failedOf = (p) => num(p.failed);
+  var reviewOf = (p) => num(p.review);
   var inFlightOf = (p) => doingOf(p) + failedOf(p);
   var prog = (p) => ({ done: doneOf(p), total: totalOf(p) });
   function taskLabel(t) {
     if (t.status === "done") return { cls: "b-done", label: "\u5DF2\u5B8C\u6210", icon: "i-done" };
     if (t.status === "doing") return { cls: "b-doing", label: "\u8FDB\u884C\u4E2D", icon: "i-doing" };
+    if (t.status === "review") return { cls: "b-ready", label: "\u5F85\u9A8C\u6536", icon: "i-ready" };
     if (t.status === "blocked") return { cls: "b-idle", label: "\u7B49\u5F85\u4E2D", icon: "i-wait" };
     return { cls: "b-ready", label: "\u5F85\u5F00\u59CB", icon: "i-ready" };
   }
   function projState(p) {
     if (p.total === 0) return { cls: "b-idle", label: "\u672A\u62C6\u89E3", icon: "i-tasks" };
     if (p.done === p.total) return { cls: "b-done", label: "\u5DF2\u5B8C\u6210", icon: "i-done" };
-    if (doingOf(p) > 0) return { cls: "b-doing", label: "\u8FDB\u884C\u4E2D", icon: "i-doing" };
+    if (doingOf(p) > 0 || reviewOf(p) > 0) return { cls: "b-doing", label: "\u8FDB\u884C\u4E2D", icon: "i-doing" };
     if (readyOf(p) > 0) return { cls: "b-ready", label: "\u5F85\u5F00\u59CB", icon: "i-ready" };
     return { cls: "b-idle", label: "\u7B49\u5F85\u4E2D", icon: "i-wait" };
   }
@@ -4458,10 +4472,12 @@
     return `${base2} \xB7 \u8FD8\u6CA1\u4EBA\u9886`;
   }
   function projBlock(p, t) {
+    const info = projInfo(p);
     if (t) {
       const body2 = [];
-      body2.push(`\u3010\u7EE7\u7EED\u505A \xB7 ${p.name} / ${t.key}\u3011`);
-      if (p.scope) body2.push(`\u9879\u76EE\uFF1A${p.scope}`);
+      const isDone = t.status === "done";
+      body2.push(isDone ? `\u3010\u5DF2\u5B8C\u6210 \xB7 ${p.name} / ${t.key}\u3011` : `\u3010\u7EE7\u7EED\u505A \xB7 ${p.name} / ${t.key}\u3011`);
+      body2.push(...info);
       body2.push("");
       body2.push(`\u4EFB\u52A1\uFF1A${t.title}`);
       body2.push(`\u72B6\u6001\uFF1A${statusLine(p, t)}`);
@@ -4469,32 +4485,73 @@
       body2.push("");
       if (t.desc) {
         body2.push("\u63A5\u7EED\u8BF4\u660E\uFF08\u5E93\u91CC\u539F\u59CB\u8BB0\u5F55\uFF0C\u542B\u522B\u4EBA\u8E29\u8FC7\u7684\u5751\uFF09\uFF1A");
-        body2.push(t.desc);
+        const DESC_MAX = 1200;
+        if (t.desc.length > DESC_MAX) {
+          body2.push(t.desc.slice(0, DESC_MAX));
+          body2.push(`\u2026\u2026\uFF08\u8BF4\u660E\u8FC7\u957F\u5DF2\u622A\u65AD\uFF0C\u5B8C\u6574 ${t.desc.length} \u5B57\u8BF7\u7528 project_context_pack \u6216\u76F4\u63A5\u770B task.description\uFF09`);
+        } else {
+          body2.push(t.desc);
+        }
       } else {
-        body2.push("\u63A5\u7EED\u8BF4\u660E\uFF1A\u5E93\u91CC\u8FD9\u4E2A\u4EFB\u52A1\u6CA1\u5199\u8BF4\u660E \u2014\u2014 \u52A8\u624B\u524D\u8BF7\u5148\u8BFB\u4E0A\u4E0B\u6587\uFF0C\u987A\u624B\u628A\u8BF4\u660E\u8865\u4E0A\u3002");
+        body2.push("\u63A5\u7EED\u8BF4\u660E\uFF1A\u5E93\u91CC\u8FD9\u4E2A\u4EFB\u52A1\u6CA1\u5199\u8BF4\u660E\uFF0C\u80FD\u7EE7\u627F\u7684\u53EA\u6709\u4E0A\u9762\u8FD9\u4E9B\u3002");
+        body2.push("  \u8BFB\u4E86\u4E0A\u4E0B\u6587\u540E\uFF0C\u628A\u4F60\u67E5\u5230\u7684\u80CC\u666F\u548C\u8E29\u5230\u7684\u5751\u5199\u8FDB\u68C0\u67E5\u70B9\u7684 pitfalls / completed\uFF1B");
+        body2.push('  \u987A\u5E26\u56DE\u62A5\u4E00\u53E5"\u8FD9\u4E2A\u4EFB\u52A1\u7684\u8BF4\u660E\u662F\u7A7A\u7684"\uFF08description \u521B\u5EFA\u65F6\u5199\u6B7B\uFF0C\u6539\u4E0D\u4E86\uFF09\u3002');
       }
       if (t.nextAct) {
         body2.push("");
         body2.push(`\u4E0A\u4E00\u6B65\u7559\u4E0B\u7684\u4EA4\u4EE3\uFF1A${t.nextAct}`);
       }
-      if (t.status === "blocked" && unmetDeps(p, t).length) {
+      if (t.status === "blocked") {
+        const waiting = unmetDeps(p, t);
         body2.push("");
-        body2.push("\u6CE8\u610F\uFF1A\u8FD9\u4E2A\u4EFB\u52A1\u5F53\u524D\u88AB\u5361\u4F4F\uFF0C\u52A8\u624B\u524D\u5148\u786E\u8BA4\u524D\u7F6E\u6761\u4EF6\u662F\u5426\u5DF2\u7ECF\u89E3\u5F00\u3002");
+        if (waiting.length) {
+          body2.push(`\u6CE8\u610F\uFF1A\u5E93\u91CC\u6807\u4E86 blocked\uFF0C\u800C\u4E14\u524D\u7F6E\u300C${waiting.join("\u3001")}\u300D\u8FD8\u6CA1\u5B8C\u6210 \u2014\u2014 \u73B0\u5728\u522B\u5F00\u5DE5\u3002`);
+        } else {
+          body2.push("\u6CE8\u610F\uFF1A\u5E93\u91CC\u6807\u4E86 blocked\uFF0C\u4F46**\u6CA1\u6709\u672A\u5B8C\u6210\u7684\u524D\u7F6E** \u2014\u2014 \u8BF4\u660E\u5361\u7684\u662F\u5916\u90E8\u539F\u56E0\uFF08\u7B49\u4EBA/\u7B49\u8D44\u8D28/\u7B49\u51B3\u5B9A\uFF09\u3002");
+          body2.push('  \u522B\u81EA\u5DF1\u60F3\u529E\u6CD5\u7ED5\u8FC7\u53BB\uFF0C\u5148\u628A"\u5230\u5E95\u5728\u7B49\u8C01"\u95EE\u6E05\u695A\u518D\u52A8\u624B\u3002');
+        }
+        const dangling = danglingDeps(p, t);
+        if (dangling.length) {
+          body2.push(`\u53E6\u5916\uFF1A\u524D\u7F6E\u300C${dangling.join("\u3001")}\u300D\u5728\u5F53\u524D\u5E93\u91CC\u67E5\u4E0D\u5230\uFF08\u53EF\u80FD\u5DF2\u5220/\u6539\u540D/\u5C5E\u4E8E\u522B\u7684\u9879\u76EE\uFF09\u2014\u2014 \u5148\u95EE\u6E05\u695A\uFF0C\u522B\u731C\u3002`);
+        }
+      }
+      if (isDone) {
+        body2.push("");
+        body2.push("\u8FD9\u4E2A\u4EFB\u52A1\u5DF2\u7ECF\u6807\u8BB0\u5B8C\u6210\u4E86\u3002\u5982\u679C\u4F60\u662F\u60F3**\u4E86\u89E3\u5B83\u505A\u4E86\u4EC0\u4E48**\uFF0C\u8BFB\u4E0A\u9762\u8FD9\u4E9B\u5C31\u591F\u4E86\uFF1B");
+        body2.push("\u5982\u679C\u4F60\u89C9\u5F97\u8FD8\u5F97\u7EE7\u7EED\u505A\uFF0C\u5148\u8BF4\u6E05\u695A\u539F\u56E0\uFF0C\u522B\u76F4\u63A5\u628A\u72B6\u6001\u6539\u56DE\u53BB\u91CD\u5F00\u3002");
+        body2.push(`\u60F3\u62FF\u5B8C\u6574\u4E0A\u4E0B\u6587\uFF1Aproject_task_dispatch(project="${p.key}", task_key="${t.key}") \u62FF id \u2192 project_context_pack\u3002`);
+        return body2.join("\n");
       }
       body2.push("");
-      body2.push("\u6267\u884C\u8981\u6C42\uFF1A");
-      body2.push(`  1) \u5148 project_context_pack(project="${p.key}", task_id="${t.key}") \u8BFB\u5168\u4E0A\u4E0B\u6587\u3002`);
-      body2.push(...mapRequirement(p));
-      body2.push("  3) \u6536\u5C3E\u628A\u7ED3\u8BBA\u81EA\u52A8\u5199\u56DE\u5E93\u91CC\uFF1Aproject_checkpoint + project_artifact_publish + project_task_update\u3002");
-      body2.push("  4) \u54EA\u4E9B\u8BE5\u4F60\u81EA\u5DF1\u5B9A\u3001\u54EA\u4E9B\u8BE5\u6765\u95EE\u6211\uFF0C\u4F60\u81EA\u5DF1\u5224\u65AD \u2014\u2014 \u4F46\u522B\u8BA9\u4E0B\u4E2A\u4F1A\u8BDD\u628A\u540C\u6837\u7684\u4E8B\u518D\u95EE\u4E00\u904D\u3002");
+      body2.push("\u6267\u884C\u8981\u6C42\uFF08\u987A\u5E8F\u522B\u6362 \u2014\u2014 \u6362\u9519\u4E00\u6B65\u4F1A\u628A\u81EA\u5DF1\u9501\u6B7B\uFF0C\u89C1\u7B2C 4 \u6761\uFF09\uFF1A");
+      body2.push(`  1) \u5148\u767B\u8BB0\u5E76\u9886\u4EFB\u52A1\uFF0C\u62FF\u5230\u5B83\u7684 id\uFF08\u6CE8\u610F\uFF1A**id \u4E0D\u662F\u4E0B\u9762\u8FD9\u4E2A key**\uFF0C\u662F\u5E93\u91CC 32 \u4F4D uuid\uFF09\uFF1A`);
+      body2.push(`     project_task_dispatch(project="${p.key}", task_key="${t.key}")   \u2190 \u8FD4\u56DE\u91CC\u627E id`);
+      body2.push(`     \u4E0D\u9886\u5C31\u76F4\u63A5\u5E72\u7684\u8BDD\uFF0C\u4F60\u53D1\u4E0D\u4E86\u4EA7\u51FA\u3001\u6700\u540E\u4E5F\u6807\u4E0D\u4E86\u5B8C\u6210\uFF08\u90A3\u4E24\u4EF6\u4E8B\u90FD\u8981\u6C42"\u4EFB\u52A1\u5728\u4F60\u540D\u4E0B"\uFF09\u3002`);
+      body2.push(`  2) \u7528\u90A3\u4E2A id \u8BFB\u4E0A\u4E0B\u6587\uFF1Aproject_context_pack(project="${p.key}", task_id="<\u4E0A\u4E00\u6B65\u7684 id>")`);
+      body2.push("     \u9A8C\u6536\u6807\u51C6\u4EE5\u91CC\u9762\u7684 Objective / Acceptance \u4E3A\u51C6\uFF1B\u8FD9\u4E24\u4E2A\u662F\u7A7A\u7684\u5C31\u81EA\u5DF1\u5199\u51FA\u9A8C\u6536\u6807\u51C6\u5E76\u56DE\u5199\u3002");
+      body2.push(...mapRequirement(p, "3"));
+      body2.push("  4) \u5E72\u6D3B\u3002**\u6536\u5C3E\u987A\u5E8F\u4E5F\u4E0D\u80FD\u6362**\uFF1A");
+      body2.push("     a. project_checkpoint(project=\u2026, task_id=<id>, state={completed/not_done/pitfalls/blockers/next_action})");
+      body2.push('     b. project_artifact_publish(project=\u2026, task_id=<id>, kind="doc", path="<\u771F\u5B9E\u5B58\u5728\u7684\u6587\u4EF6\u7684\u7EDD\u5BF9\u8DEF\u5F84>", revision="<7\u4F4D\u4EE5\u4E0Agit\u77EDSHA>")');
+      body2.push("        \u26A0 \u5FC5\u987B\u662F\u4F60\u81EA\u5DF1\u540D\u4E0B\u7684\u4EFB\u52A1\u624D\u80FD\u53D1\uFF1B\u8DEF\u5F84\u5FC5\u987B\u843D\u5728\u9879\u76EE\u76EE\u5F55\u5185\u4E14\u6587\u4EF6\u771F\u7684\u5B58\u5728\u3002");
+      body2.push('     c. project_task_update(project=\u2026, task_id=<id>, status="done", next_action="\u4E0B\u4E00\u6B65")');
+      body2.push("     d. \u4EE3\u7801\u5730\u56FE\u8981\u66F4\u65B0\u7684\u8BDD\uFF0C\u653E\u5728**\u6700\u540E**\uFF08\u5B83\u8981\u6C42\u4F60\u624B\u91CC\u8FD8\u6709 running \u4EFB\u52A1\uFF0C\u5148\u6807 done \u5C31\u5199\u4E0D\u8FDB\u53BB\u4E86\uFF09");
+      body2.push(...discipline());
+      body2.push("  \u54EA\u4E9B\u8BE5\u4F60\u81EA\u5DF1\u5B9A\u3001\u54EA\u4E9B\u8BE5\u6765\u95EE\u6211\uFF0C\u4F60\u81EA\u5DF1\u5224\u65AD \u2014\u2014 \u4F46\u522B\u8BA9\u4E0B\u4E2A\u4F1A\u8BDD\u628A\u540C\u6837\u7684\u4E8B\u518D\u95EE\u4E00\u904D\u3002");
       return body2.join("\n");
     }
     const body = [];
     body.push(`\u3010\u7EE7\u7EED\u505A \xB7 ${p.name}\u3011`);
-    if (p.scope) body.push(`\u9879\u76EE\uFF1A${p.scope}`);
+    body.push(...info);
     body.push("");
-    body.push(`\u8FDB\u5EA6\uFF1A${p.done}/${p.total} \u5DF2\u5B8C\u6210${p.ready ? ` \xB7 ${p.ready} \u4E2A\u5F85\u5F00\u59CB` : ""}${p.doing ? ` \xB7 ${p.doing} \u4E2A\u5728\u505A` : ""}`);
+    const pbits = [`${p.done}/${p.total} \u5DF2\u5B8C\u6210`];
+    if (p.doing) pbits.push(`${p.doing} \u4E2A\u5728\u505A`);
+    if (p.review) pbits.push(`${p.review} \u4E2A\u5F85\u9A8C\u6536`);
+    if (p.ready) pbits.push(`${p.ready} \u4E2A\u5F85\u5F00\u59CB`);
+    if (p.failed) pbits.push(`${p.failed} \u4E2A\u5361\u4F4F/\u5931\u8D25`);
+    body.push(`\u8FDB\u5EA6\uFF1A${pbits.join(" \xB7 ")}`);
     body.push("");
+    const shown = [];
     const group = (title, list) => {
       if (!list.length) return;
       body.push(`${title}\uFF1A`);
@@ -4502,51 +4559,116 @@
         const dep = x.depends?.length ? `\uFF08\u7B49 ${x.depends.join("\u3001")}\uFF09` : "";
         const who = x.owner ? `\uFF08${x.owner}\uFF09` : "";
         body.push(`  \xB7 ${x.key} \u2014\u2014 ${x.title}${dep}${who}`);
+        shown.push(x.key);
       }
     };
     group("\u8FD8\u6CA1\u4EBA\u9886", p.tasks.filter((x) => x.status === "ready"));
     group("\u6B63\u5728\u505A", p.tasks.filter((x) => x.status === "doing"));
+    group("\u5F85\u9A8C\u6536", p.tasks.filter((x) => x.status === "review"));
     group("\u88AB\u5361\u4F4F", p.tasks.filter((x) => x.status === "blocked"));
-    group("\u5DF2\u5B8C\u6210", p.tasks.filter((x) => x.status === "done"));
-    body.push("");
-    body.push("\u8981\u63A5\u7740\u505A\uFF0C\u8BF7\u5148\u8BF4\u6E05\u695A\u505A\u54EA\u4E2A\u4EFB\u52A1 \u2014\u2014 \u6BCF\u4E2A\u4EFB\u52A1\u5361\u4E0A\u90FD\u80FD\u5355\u72EC\u590D\u5236\u63A5\u7EED\u5757\uFF0C");
-    body.push("\u91CC\u9762\u5E26\u7740\u90A3\u4E2A\u4EFB\u52A1\u7684\u5B8C\u6574\u4EA4\u63A5\u8BF4\u660E\uFF08\u542B\u522B\u4EBA\u8E29\u8FC7\u7684\u5751\uFF09\u3002");
+    const doneAll = p.tasks.filter((x) => x.status === "done");
+    const DONE_SHOW = 5;
+    if (doneAll.length) {
+      body.push("\u5DF2\u5B8C\u6210\uFF1A");
+      for (const x of doneAll.slice(0, DONE_SHOW)) {
+        body.push(`  \xB7 ${x.key} \u2014\u2014 ${x.title}`);
+        shown.push(x.key);
+      }
+      if (doneAll.length > DONE_SHOW) {
+        body.push(`  \uFF08\u53E6\u6709 ${doneAll.length - DONE_SHOW} \u4E2A\u5DF2\u5B8C\u6210\u6CA1\u5217\u51FA\u6765\uFF0C\u9700\u8981\u65F6\u7528 project_overview \u67E5\uFF09`);
+      }
+    }
+    const rest = p.tasks.filter((x) => !shown.includes(x.key));
+    if (rest.length) {
+      body.push(`\u5176\u4ED6\u72B6\u6001 ${rest.length} \u4E2A\uFF1A${rest.map((x) => `${x.key}\uFF08${x.status}\uFF09`).join("\u3001")}`);
+    }
     body.push("");
     body.push("\u6267\u884C\u8981\u6C42\uFF1A");
-    body.push(`  1) \u5148 project_context_pack(project="${p.key}") \u8BFB\u5168\u4E0A\u4E0B\u6587\u3002`);
-    body.push(...mapRequirement(p));
+    body.push(`  1) \u5148\u770B\u9879\u76EE\u73B0\u72B6\uFF1Aproject_overview(project="${p.key}") \u62FF\u4EFB\u52A1\u6E05\u5355\u548C\u6700\u8FD1\u4E8B\u4EF6\u3002`);
+    body.push(...mapRequirement(p, "2"));
+    body.push(`  3) \u672C\u4F1A\u8BDD\u6CA1\u6307\u5B9A\u505A\u54EA\u4E2A\u4EFB\u52A1\u7684\u8BDD\uFF0C\u522B\u56DE\u6765\u95EE \u2014\u2014 \u76F4\u63A5\u67E5\u53EF\u9886\u7684\uFF1A`);
+    body.push(`     project_ready_tasks(project="${p.key}")\uFF0C\u6311\u4E00\u4E2A"\u8FD8\u6CA1\u4EBA\u9886"\u7684\uFF0C`);
+    body.push(`     \u7136\u540E project_task_dispatch(project="${p.key}", task_key="<\u6311\u4E2D\u7684\u90A3\u4E2A>") \u9886\u8D70\u5E76\u62FF\u5230 id\u3002`);
+    body.push("     \u4E0A\u9762\u6BCF\u4E2A\u4EFB\u52A1\u5361\u4E5F\u80FD\u5355\u72EC\u590D\u5236\u63A5\u7EED\u5757\uFF0C\u91CC\u9762\u5E26\u7740\u90A3\u4E2A\u4EFB\u52A1\u7684\u5B8C\u6574\u4EA4\u63A5\u8BF4\u660E\u3002");
+    body.push(...discipline());
     return body.join("\n");
   }
-  function mapRequirement(p) {
+  function repoLine(p) {
+    const root = (p.root || "").trim();
+    return root ? [`\u4ED3\u5E93\uFF1A${root}`] : ["\u4ED3\u5E93\uFF1A\u5E93\u91CC\u6CA1\u767B\u8BB0\u8FD9\u4E2A\u9879\u76EE\u7684\u4EE3\u7801\u76EE\u5F55\uFF08\u5148\u7528 project_for_path \u786E\u8BA4\u5DE5\u4F5C\u76EE\u5F55\uFF09"];
+  }
+  function projInfo(p) {
+    const scope = (p.scope || "").trim();
+    return scope ? [`\u9879\u76EE\uFF1A${scope}`, ...repoLine(p)] : [`\u9879\u76EE\uFF1A\u5E93\u91CC\u6CA1\u5199\u8FD9\u4E2A\u9879\u76EE\u7684 scope \u2014\u2014 \u5148\u7528 project_overview(project="${p.key}") \u641E\u6E05\u695A\u5B83\u662F\u4EC0\u4E48\u518D\u52A8\u624B\u3002`, ...repoLine(p)];
+  }
+  function danglingDeps(p, t) {
+    if (!t.depends?.length) return [];
+    const known = new Set(p.tasks.map((x) => x.key));
+    return t.depends.filter((d) => !known.has(d));
+  }
+  function discipline() {
+    return [
+      "",
+      "  \u51E0\u6761\u7EAA\u5F8B\uFF1A",
+      "    \xB7 \u4EFB\u4F55\u5DE5\u5177\u62A5\u9519\uFF0C\u628A**\u62A5\u9519\u539F\u6587**\u7167\u8D34\u56DE\u6765\uFF08\u542B\u5DE5\u5177\u540D\u548C\u5B8C\u6574 message\uFF09\uFF0C\u4E0D\u8981\u81EA\u5DF1\u6539\u8FF0\u3001\u4E0D\u8981\u5047\u88C5\u6210\u529F\u3002",
+      "    \xB7 \u987A\u5E8F\u6700\u5173\u952E\uFF1A**\u5148\u9886\u4EFB\u52A1 \u2192 \u52A8\u624B \u2192 \u68C0\u67E5\u70B9/\u4EA7\u51FA \u2192 \u6700\u540E\u624D\u6807 done \u2192 \u518D\u66F4\u65B0\u4EE3\u7801\u5730\u56FE**\u3002",
+      "      \u5148\u6807 done \u4F1A\u5BFC\u81F4\uFF1A\u53D1\u4E0D\u51FA\u4EA7\u51FA\u3001\u5199\u4E0D\u4E86\u4EE3\u7801\u5730\u56FE\uFF08\u90A3\u4E24\u4EF6\u4E8B\u90FD\u8981\u6C42\u4EFB\u52A1\u8FD8\u5728\u4F60\u540D\u4E0B/\u662F\u6D3B\u8DC3\u72B6\u6001\uFF09\u3002",
+      "    \xB7 \u6807 done \u53EA\u662F\u6807\u72B6\u6001\u3002\u7B97\u4E0D\u7B97\u771F\u5B8C\u6210\u7531**\u72EC\u7ACB\u5BF9\u8D26**\u8BF4\u4E86\u7B97\uFF0C\u800C\u4E14\u5BF9\u8D26\u4EBA\u4E0D\u80FD\u662F\u4EFB\u52A1\u6240\u6709\u8005\uFF1A",
+      '      project_reconcile(project=\u2026, task_id=<id>, status="verified", reviewer_session_id=<\u53E6\u4E00\u4E2A\u4F1A\u8BDD>)\u3002',
+      "    \xB7 context_pack \u62A5\u9519\u6216\u5185\u5BB9\u88AB\u622A\u65AD\uFF08\u51FA\u73B0 [context truncated \u2026]\uFF09\u65F6\uFF1A\u6539\u7528 project_overview +",
+      "      project_code_map \u5206\u6279\u8BFB\uFF0C\u522B\u51ED\u5370\u8C61\u5F00\u5DE5\u3002"
+    ];
+  }
+  function mapRequirement(p, num2 = "2") {
     const nodes = p.mapNodes || 0;
     const edges = p.mapEdges || 0;
-    const line = `  2) \u63A5\u7740\u8BFB\u77E5\u8BC6\u56FE\u8C31\uFF08\u4EE3\u7801\u5730\u56FE\uFF09\u2014\u2014 \u5F04\u6E05\u6A21\u5757\u5212\u5206\u3001\u5404\u81EA\u804C\u8D23\u3001\u4EE3\u7801\u5728\u54EA\u4E2A\u6587\u4EF6\u3001\u6A21\u5757\u4E4B\u95F4\u600E\u4E48\u8C03\u3002`;
+    if (p.kind === "doc") {
+      return [
+        num2 + ") \u8FD9\u662F\u8D44\u6599/\u65B9\u6CD5\u7C7B\u9879\u76EE\uFF0C\u4E0D\u7528\u8BFB\u4EE3\u7801\u5730\u56FE\uFF1B\u8981\u68B3\u7406\u7684\u8BDD\u628A\u8D44\u6599\u7ED3\u6784\u548C\u6765\u6E90\u5199\u8FDB\u77E5\u8BC6\u56FE\u8C31\u3002"
+      ];
+    }
+    const line = num2 + ") \u8BFB\u77E5\u8BC6\u56FE\u8C31\uFF08\u4EE3\u7801\u5730\u56FE\uFF09\u2014\u2014 \u5F04\u6E05\u6A21\u5757\u5212\u5206\u3001\u5404\u81EA\u804C\u8D23\u3001\u4EE3\u7801\u5728\u54EA\u4E2A\u6587\u4EF6\u3001\u6A21\u5757\u4E4B\u95F4\u600E\u4E48\u8C03\u3002";
     if (nodes > 0) {
       return [
         line,
-        `     project_context_pack \u91CC\u5C31\u5E26\u7740\uFF08\u672C\u9879\u76EE\u5DF2\u8BB0\u5F55 ${nodes} \u4E2A\u6A21\u5757 / ${edges} \u6761\u8C03\u7528\u5173\u7CFB\uFF09\uFF0C`,
-        `     \u4E5F\u53EF\u4EE5\u5355\u72EC project_code_map(project="${p.key}") \u53D6\u5B8C\u6574\u7248\u3002`,
-        `     \u52A8\u624B\u524D\u5148\u770B\u5B83\uFF0C\u522B\u91CD\u8BFB\u5168\u4ED3\u5E93\uFF1B\u6539\u4E86\u4EE3\u7801\u7684\u5F62\u72B6\u5C31\u7528 project_code_map_write \u66F4\u65B0\u56DE\u53BB\u3002`
+        `     \u5DF2\u8BB0\u5F55 ${nodes} \u4E2A\u6A21\u5757 / ${edges} \u6761\u8C03\u7528\u5173\u7CFB\uFF1Bcontext_pack \u91CC\u5C31\u5E26\u7740\uFF0C`,
+        `     \u4E5F\u53EF\u4EE5\u5355\u72EC project_code_map(project="${p.key}") \u53D6\u5B8C\u6574\u7248\u3002\u52A8\u624B\u524D\u5148\u770B\u5B83\uFF0C\u522B\u91CD\u8BFB\u5168\u4ED3\u5E93\u3002`,
+        `     \u6539\u4E86\u4EE3\u7801\u7684\u5F62\u72B6\u5C31\u7528 project_code_map_write \u66F4\u65B0\u56DE\u53BB\uFF0C**\u8BB0\u5F97\u5E26 revision**\uFF087 \u4F4D\u4EE5\u4E0A git \u77ED SHA\uFF09\uFF0C`,
+        `     \u4E0D\u4F20\u7684\u8BDD\u4E0B\u4E2A\u4F1A\u8BDD\u770B\u5230\u7684\u4F1A\u662F unversioned\uFF08\u4F1A\u6253 WARNING\uFF09\uFF1Breplace=True \u4F1A\u88AB\u62D2\uFF0C\u53EA\u80FD\u5408\u5E76\u3002`
       ];
     }
     return [
       line,
       `     \u4F46\u8FD9\u4E2A\u9879\u76EE\u73B0\u5728**\u8FD8\u6CA1\u6709**\u4EE3\u7801\u5730\u56FE\uFF080 \u4E2A\u6A21\u5757\uFF09\u2014\u2014 \u8BFB\u4E0D\u5230\u4E1C\u897F\u3002`,
-      `     \u6240\u4EE5\u8BF7\u987A\u624B\u505A\u4E00\u4EF6\u4E8B\uFF1A\u8BFB\u4E00\u904D\u4EE3\u7801\u540E\u7528 project_code_map_write \u628A\u5730\u56FE\u5EFA\u8D77\u6765`,
-      `     \uFF08\u6A21\u5757 / \u804C\u8D23 / \u6587\u4EF6\u8DEF\u5F84 / \u8C03\u7528\u5173\u7CFB\uFF09\uFF0C\u4E0B\u4E2A\u4F1A\u8BDD\u624D\u4E0D\u7528\u91CD\u8BFB\u5168\u4ED3\u5E93\u3002`
+      `     \u6240\u4EE5\u987A\u624B\u505A\u4E00\u4EF6\u4E8B\uFF1A\u8BFB\u4E00\u904D\u4EE3\u7801\u540E\u7528 project_code_map_write \u628A\u5730\u56FE\u5EFA\u8D77\u6765`,
+      `     \uFF08\u6A21\u5757 / \u804C\u8D23 / \u6587\u4EF6\u8DEF\u5F84 / \u8C03\u7528\u5173\u7CFB + revision\uFF09\uFF0C\u4E0B\u4E2A\u4F1A\u8BDD\u624D\u4E0D\u7528\u91CD\u8BFB\u5168\u4ED3\u5E93\u3002`
     ];
   }
   function splitBlock(p) {
     const body = [];
     body.push(`\u3010\u62C6\u89E3 ${p.name}\u3011`);
-    if (p.scope) body.push(`\u9879\u76EE\uFF1A${p.scope}`);
+    body.push(...projInfo(p));
     body.push("");
     body.push("\u8FD9\u4E2A\u9879\u76EE\u8FD8\u6CA1\u6709\u62C6\u4EFB\u52A1\u3002");
     body.push("\u6267\u884C\u8981\u6C42\uFF1A");
-    body.push(`  1) \u5148 project_context_pack(project="${p.key}") \u8BFB\u4E0A\u4E0B\u6587\u3002`);
-    body.push(...mapRequirement(p));
-    body.push("  3) \u628A\u5B83\u89C4\u5212\u6210\u51E0\u4E2A\u4EFB\u52A1/\u6A21\u5757\uFF1A\u6BCF\u4E2A\u4EFB\u52A1\u5199\u6E05\u695A\u8981\u4EA4\u4EC0\u4E48\uFF08\u9A8C\u6536\u6807\u51C6\uFF09\uFF0C\u7528 project_task_create \u5199\u8FDB\u5171\u4EAB\u5E93\u3002");
-    body.push("  4) \u62C6\u5B8C\u544A\u8BC9\u6211\u62C6\u6210\u4E86\u54EA\u51E0\u5757\uFF0C\u6211\u81EA\u5DF1\u627E\u4EBA\u505A \u2014\u2014 \u4E0D\u8981\u81EA\u5DF1\u5F00\u5B50\u4F1A\u8BDD\u5206\u6D3E\u4EFB\u52A1\u3002");
+    body.push(`  1) \u5148\u770B\u73B0\u72B6\uFF1Aproject_overview(project="${p.key}") \u62FF\u9879\u76EE\u56FE\u548C\u6700\u8FD1\u4E8B\u4EF6\u3002`);
+    body.push(...mapRequirement(p, "2"));
+    body.push("  3) \u5148\u5224\u65AD\u8FD9\u4E2A\u9879\u76EE**\u8981\u4E0D\u8981**\u62C6\u4EFB\u52A1\uFF1A");
+    body.push('     \xB7 \u8981\u5199\u4EE3\u7801/\u8981\u505A\u529F\u80FD \u2192 \u62C6\u6210\u82E5\u5E72\u4EFB\u52A1\uFF0C\u6BCF\u4E2A\u5199\u6E05"\u8981\u4EA4\u4EC0\u4E48"\uFF08\u9A8C\u6536\u6807\u51C6\uFF09\u3002');
+    body.push("     \xB7 \u7EAF\u8D44\u6599/\u7EAF\u8BB0\u5F55\u7C7B \u2192 \u4E0D\u7528\u62C6\uFF0C\u628A\u8D44\u6599\u7ED3\u6784\u548C\u6765\u6E90\u6574\u7406\u8FDB\u77E5\u8BC6\u56FE\u8C31\u5C31\u884C\uFF0C\u522B\u786C\u9020\u4EFB\u52A1\u3002");
+    body.push("  4) **\u5EFA\u4E4B\u524D\u5148\u67E5\u91CD**\uFF1Aproject_overview \u770B\u4E00\u773C\u5DF2\u6709\u4EFB\u52A1\uFF0C\u522B\u548C\u73B0\u6709\u7684\u91CD\u4E86 \u2014\u2014");
+    body.push("     \u540C\u4E00\u4E2A key \u5EFA\u7B2C\u4E8C\u6B21\u4F1A\u76F4\u63A5\u62A5 Task already exists\uFF1B\u4F46\u6362\u4E2A key \u5EFA\u540C\u4E00\u4EF6\u4E8B\u4E0D\u4F1A\u62A5\uFF0C");
+    body.push("     \u53EA\u4F1A\u8BA9\u5E93\u91CC\u591A\u4E00\u5F20\u91CD\u590D\u5361\uFF08\u672C\u4F1A\u8BDD\u5C31\u5E72\u8FC7\u4E00\u6B21\uFF0C\u9760\u4E8B\u540E\u6838\u5BF9\u624D\u53D1\u73B0\uFF09\u3002");
+    body.push("  5) \u8981\u62C6\u7684\u8BDD\uFF0C\u6CE8\u610F\u5EFA\u4EFB\u52A1\u8FD9\u6761\u8DEF\u5206\u4E24\u79CD\u60C5\u51B5\uFF08\u5148\u786E\u8BA4\u662F\u54EA\u4E00\u79CD\uFF0C\u522B\u649E\u5899\uFF09\uFF1A");
+    body.push(`     \xB7 \u5148 project_session_register(project="${p.key}", provider="<\u4F60\u7684 provider>", model="<\u4F60\u7684 model>") \u767B\u8BB0\u81EA\u5DF1\uFF1B`);
+    body.push('       \u6CA1\u767B\u8BB0\u7684\u8BDD\u540E\u9762\u6240\u6709\u5199\u64CD\u4F5C\u90FD\u4F1A\u56E0\u4E3A"\u4F1A\u8BDD\u4E0D\u5728\u8FD9\u4E2A\u9879\u76EE\u91CC"\u800C\u5931\u8D25\u3002');
+    body.push("     \xB7 \u9879\u76EE\u8BA1\u5212\u6CA1\u9501 \u2192 \u76F4\u63A5\u7528 project_task_create(project=\u2026, task_key=\u2026, title=\u2026, description=\u2026, priority=\u2026)\u3002");
+    body.push('     \xB7 \u9879\u76EE\u8BA1\u5212\u5DF2\u9501\uFF08\u62A5 "initial plan is locked"\uFF09\u2192 \u53EA\u80FD\u63D0\u6848\uFF0C\u4E0D\u80FD\u76F4\u63A5\u5EFA\uFF1A');
+    body.push('       project_plan_propose(project=\u2026, reason=\u2026, changes=[{operation:"add_task", task_key:\u2026, title:\u2026, description:\u2026, priority:\u2026}])');
+    body.push("       \u7136\u540E**\u8BF7\u7528\u6237\u6216\u53E6\u4E00\u4E2A\u4F1A\u8BDD**\u53BB\u5BA1\u6279\uFF08project_plan_review\uFF09\u2014\u2014");
+    body.push('       \u89C4\u5219\u662F"\u63D0\u8BAE\u8005\u4E0D\u80FD\u5BA1\u81EA\u5DF1\u7684\u63D0\u6848"\uFF0C\u800C\u4E14 DSH \u4FA7\u7684\u6865\u6CA1\u66B4\u9732 review \u5DE5\u5177\uFF0C\u4F60\u81EA\u5DF1\u6279\u4E0D\u4E86\u3002');
+    body.push("  6) \u62C6\u5B8C\u628A\u7ED3\u679C\u544A\u8BC9\u6211\uFF1A\u62C6\u6210\u4E86\u54EA\u51E0\u5757\u3002**\u4E0D\u8981\u81EA\u5DF1\u5F00\u5B50\u4F1A\u8BDD\u5206\u6D3E\u4EFB\u52A1** \u2014\u2014 \u6211\u81EA\u5DF1\u627E\u4EBA\u505A\u3002");
+    body.push(...discipline());
     return body.join("\n");
   }
   var countRafs = /* @__PURE__ */ new Map();
@@ -4570,7 +4692,7 @@
   function renderStats() {
     const scope = view.kind === "projects" ? ALL : [byKey(view.proj)];
     const sumOf = (f) => scope.reduce((n, p) => n + f(p), 0);
-    const items = view.kind === "projects" ? [[ALL.length, "\u4E2A\u9879\u76EE"], [sumOf(readyOf), "\u5F85\u5F00\u59CB"], [sumOf((p) => inFlightOf(p) > 0 ? 1 : 0), "\u8FDB\u884C\u4E2D"]] : [[totalOf(scope[0]), "\u4E2A\u4EFB\u52A1"], [sumOf(doneOf), "\u5DF2\u5B8C\u6210"], [sumOf(readyOf), "\u5F85\u5F00\u59CB"]];
+    const items = view.kind === "projects" ? [[ALL.length, "\u4E2A\u9879\u76EE"], [sumOf((p) => inFlightOf(p) > 0 ? 1 : 0), "\u8FDB\u884C\u4E2D"], [sumOf(readyOf), "\u5F85\u5F00\u59CB"], [sumOf(reviewOf), "\u5F85\u9A8C\u6536"]] : [[totalOf(scope[0]), "\u4E2A\u4EFB\u52A1"], [sumOf(doneOf), "\u5DF2\u5B8C\u6210"], [sumOf((p) => inFlightOf(p)), "\u8FDB\u884C\u4E2D"], [sumOf(readyOf), "\u5F85\u5F00\u59CB"], [sumOf(reviewOf), "\u5F85\u9A8C\u6536"]];
     const key = items.map(([n, l]) => `${n}:${l}`).join("|");
     if (key === lastStatsKey) return;
     lastStatsKey = key;
@@ -4617,7 +4739,13 @@
     const single = total === 1;
     const empty = total === 0;
     const t0 = p.tasks[0];
-    const meta = total === 0 ? `<span>\u672A\u62C6\u89E3 \xB7 \u5148\u7528\u300C\u62C6\u4EFB\u52A1\u300D\u628A\u5B83\u62C6\u5F00</span>` : single ? `<span class="meta-ready">${t0 ? taskLabel(t0).label : ""}</span><span>${p.ago}</span>` : `<span class="cells" title="${total} \u4E2A\u4EFB\u52A1\uFF08\u5DF2\u5B8C\u6210 ${done} / \u8FDB\u884C\u4E2D ${inFlightOf(p)} / \u5F85\u5F00\u59CB ${readyN}\uFF09">${Array(done).fill('<i class="c done"></i>').join("") + Array(inFlightOf(p)).fill('<i class="c doing"></i>').join("") + Array(readyN).fill('<i class="c ready"></i>').join("")}</span><span>${done}/${total}</span>${readyN ? `<span class="meta-ready">${readyN} \u5F85\u5F00\u59CB</span>` : ""}<span>${p.ago}</span>`;
+    const artN = p.artifacts || 0;
+    const mapN = p.mapNodes || 0;
+    const extraBits = [];
+    if (artN > 0) extraBits.push(`<span class="meta-extra" title="${artN} \u4E2A\u4EA7\u51FA\uFF08\u4F1A\u8BDD\u53D1\u5E03\u8FC7\u7684\u4EA4\u4ED8\u7269\uFF09"><svg class="ic"><use href="#i-artifact"/></svg>${artN}</span>`);
+    if (mapN > 0) extraBits.push(`<span class="meta-extra" title="\u4EE3\u7801\u5730\u56FE ${mapN} \u8282\u70B9 / ${p.mapEdges || 0} \u6761\u8C03\u7528\u5173\u7CFB"><svg class="ic"><use href="#i-graph"/></svg>${mapN}</span>`);
+    const extraRow = extraBits.length ? `<div class="mr">${extraBits.join("")}</div>` : "";
+    const meta = total === 0 ? `<div class="mr"><span>\u672A\u62C6\u89E3 \xB7 \u5148\u7528\u300C\u62C6\u4EFB\u52A1\u300D\u628A\u5B83\u62C6\u5F00</span></div>${extraRow}` : single ? `<div class="mr"><span class="meta-ready">${t0 ? taskLabel(t0).label : ""}</span><span>${p.ago}</span></div>${extraRow}` : `<div class="mr"><span class="cells" title="${total} \u4E2A\u4EFB\u52A1\uFF08\u5DF2\u5B8C\u6210 ${done} / \u8FDB\u884C\u4E2D ${inFlightOf(p)} / \u5F85\u9A8C\u6536 ${reviewOf(p)} / \u5F85\u5F00\u59CB ${readyN}\uFF09">${Array(done).fill('<i class="c done"></i>').join("") + Array(inFlightOf(p)).fill('<i class="c doing"></i>').join("") + Array(readyN).fill('<i class="c ready"></i>').join("")}</span><span>${done}/${total}</span>${readyN ? `<span class="meta-ready">${readyN} \u5F85\u5F00\u59CB</span>` : ""}<span>${p.ago}</span></div>${extraRow}`;
     return `
   <div class="card" data-proj="${p.key}">
     <div class="card-body">
@@ -4663,9 +4791,10 @@
     }
     listEl.innerHTML = html;
   }
-  var TASK_ORDER = { doing: 0, ready: 1, blocked: 2, done: 3 };
+  var TASK_ORDER = { doing: 0, review: 1, ready: 2, blocked: 3, done: 4 };
   var TASK_GROUP_TITLE = {
     doing: "\u6B63\u5728\u505A",
+    review: "\u5F85\u9A8C\u6536",
     ready: "\u5F85\u5F00\u59CB",
     blocked: "\u88AB\u5361\u4F4F",
     done: "\u5DF2\u5B8C\u6210"
@@ -4725,7 +4854,10 @@
       const h = listEl.querySelector("[data-vt]");
       if (h) h.style.viewTransitionName = name;
     });
-    if (!p.tasks.length && p.total > 0) {
+    if ((!p.tasks.length || libraryDirty) && p.total > 0) {
+      p.tasks = [];
+      p.fromDb = false;
+      libraryDirty = false;
       await loadTasks(key);
       if (open && view.kind === "tasks" && view.proj === key) renderTasks(key);
     }
@@ -4820,6 +4952,55 @@
       ta.remove();
     }
     toast(`\u5DF2\u590D\u5236\u300C${what}\u300D\xB7 \u7C98\u8FDB\u4EFB\u610F agent \u5BF9\u8BDD\u6846`);
+  }
+  var LIBRARY_RECORD_REQUIREMENT = [
+    `\u3010\u5171\u4EAB\u9879\u76EE\u5E93 \xB7 \u8BB0\u5F55\u8981\u6C42\u3011`,
+    ``,
+    `\u26A0 \u672C\u4F1A\u8BDD\u53EF\u80FD\u505A\u4E86\u4E0D\u6B62\u4E00\u4E2A\u4EFB\u52A1\u3002\u6BCF\u4E00\u8F6E\u505A\u8FC7\u7684\u90FD\u5F97\u8BB0\uFF0C\u4E0D\u80FD\u53EA\u8BB0\u6700\u540E\u4E00\u8F6E \u2014\u2014`,
+    `   \u5E93\u91CC\u6CA1\u6709"\u6574\u573A\u4F1A\u8BDD"\u8FD9\u79CD\u8BB0\u5F55\u7C92\u5EA6\uFF08\u68C0\u67E5\u70B9\u5FC5\u987B\u6302\u5728\u5177\u4F53\u4EFB\u52A1\u4E0A\uFF09\uFF0C\u505A\u4E86 N \u4E2A\u5C31\u8BB0 N \u6B21\u3002`,
+    ``,
+    `\u3010\u7B2C\u4E00\u6B65 \xB7 \u76D8\u70B9\u3011\u628A\u672C\u4F1A\u8BDD\u4ECE\u5F00\u59CB\u5230\u73B0\u5728\u505A\u8FC7\u7684\u4EFB\u52A1\u5217\u4E00\u904D\u3002\u6539\u8FC7\u4EE3\u7801 / \u5199\u8FC7\u6587\u6863 /`,
+    `   \u67E5\u8FC7\u95EE\u9898\u5E76\u5F97\u51FA\u8FC7\u7ED3\u8BBA \u2014\u2014 \u90FD\u7B97\u3002\u7279\u522B\u6CE8\u610F\u6CA1\u5728\u5E93\u91CC\u9886\u8FC7\u7684\u90A3\u4E9B\uFF08\u6700\u5BB9\u6613\u6F0F\uFF09\u3002`,
+    ``,
+    `\u3010\u7B2C\u4E8C\u6B65 \xB7 \u9010\u4E2A\u95ED\u73AF\u3011\u5BF9\u6BCF\u4E00\u4E2A\u4EFB\u52A1\uFF0C\u6309\u8FD9\u4E2A\u987A\u5E8F\u505A\uFF08\u987A\u5E8F\u9519\u4E86\u4F1A\u628A\u81EA\u5DF1\u9501\u6B7B\uFF09\uFF1A`,
+    `   \u2460 project_task_dispatch(project=\u2026, task_key="<\u4EFB\u52A1\u7684 key>") \u2192 \u62FF\u5230 id\uFF0832 \u4F4D uuid\uFF09`,
+    `      \u26A0 \u540E\u9762\u6240\u6709\u5DE5\u5177\u8981\u7684\u90FD\u662F\u8FD9\u4E2A **id**\uFF0C\u4E0D\u662F key \u2014\u2014 \u4F20 key \u4F1A\u62A5 Task not found\u3002`,
+    `      \u6CA1\u9886\u8FC7\u4EFB\u52A1\u7684\u540E\u679C\uFF1A\u53D1\u4E0D\u51FA\u4EA7\u51FA\u3001\u6807\u4E0D\u4E86\u5B8C\u6210\uFF08\u90FD\u8981\u6C42"\u4EFB\u52A1\u5728\u4F60\u540D\u4E0B"\uFF09\u3002`,
+    `   \u2461 project_checkpoint(project=\u2026, task_id=<id>, state={...}) \u2014\u2014 \u4E94\u9879\u4E00\u4E2A\u90FD\u522B\u7701\uFF1A`,
+    `        completed \u5B8C\u6210\u4E86\u4EC0\u4E48 / not_done \u6CA1\u5B8C\u6210\u4EC0\u4E48 / pitfalls \u8E29\u8FC7\u7684\u5751\uFF08\u2605 \u6700\u91CD\u8981\uFF0C\u5199\u5177\u4F53\uFF09`,
+    `        / blockers \u5361\u5728\u4EC0\u4E48\u5916\u90E8\u4F9D\u8D56 / next_action \u4E0B\u4E00\u6B65`,
+    `      \u26A0 \u5E26 next_action \u7684\u68C0\u67E5\u70B9\u4F1A\u4E00\u5E76\u66F4\u65B0\u4EFB\u52A1\u7684"\u4E0B\u4E00\u6B65"\u5E76\u8BA9\u9762\u677F\u5237\u65B0\uFF1B\u4E0D\u5E26\u5C31\u4E0D\u4F1A\u52A8\u9762\u677F\u3002`,
+    `   \u2462 project_artifact_publish(project=\u2026, task_id=<id>, kind="doc", path="<\u771F\u5B9E\u6587\u4EF6\u7EDD\u5BF9\u8DEF\u5F84>")`,
+    `      \u8DEF\u5F84\u5FC5\u987B\u843D\u5728\u9879\u76EE\u76EE\u5F55\u5185\u3001\u6587\u4EF6\u5FC5\u987B\u771F\u7684\u5B58\u5728\uFF0C\u5426\u5219\u5F53\u573A\u62A5\u9519\u3002`,
+    `   \u2463 project_task_update(project=\u2026, task_id=<id>, status="done", next_action="\u4E0B\u4E00\u6B65")`,
+    `   \u2464 \u4EE3\u7801\u5730\u56FE\u8981\u66F4\u65B0\u7684\u8BDD\u653E**\u6700\u540E**\uFF08\u5B83\u8981\u6C42\u4F60\u624B\u91CC\u8FD8\u6709\u6D3B\u8DC3\u4EFB\u52A1\uFF0C\u5148\u6807 done \u5C31\u5199\u4E0D\u8FDB\u53BB\u4E86\uFF09\u3002`,
+    ``,
+    `\u3010\u7B2C\u4E09\u6B65 \xB7 \u81EA\u68C0\u3011\u9010\u4E2A\u5FF5\u4E00\u904D\uFF1A\u8FD9\u4E2A\u4EFB\u52A1\u5728\u5E93\u91CC\u662F done \u4E86\u5417\uFF1F\u5B83\u6709\u68C0\u67E5\u70B9\u4E86\u5417\uFF1F`,
+    `   \u6211\u7B2C\u4E00\u6B65\u5217\u51FA\u7684\u4EFB\u52A1\uFF0C\u6709\u6CA1\u6709\u54EA\u4E2A\u8FD8\u6CA1\u8D70\u5B8C\u4E0A\u9762\u8FD9\u51E0\u6B65\uFF1F`,
+    ``,
+    `\u60F3\u8BA9\u9762\u677F\u52A8\uFF0C\u5FC5\u987B\u52A8**\u4EFB\u52A1\u672C\u8EAB**\uFF08\u72B6\u6001 / \u8BF4\u660E / \u4E0B\u4E00\u6B65\uFF09\u2014\u2014 \u9762\u677F\u8BFB\u7684\u662F\u5B83\u3002`,
+    `\u5B8C\u6574\u673A\u5236\uFF08\u542B\u5404\u79CD\u95E8\u7981\u548C\u62A5\u9519\u539F\u56E0\uFF09\u89C1 D:\\codex-memory\\README.md \u548C\u5404\u9879\u76EE AGENTS.md\u3002`
+  ].join("\n");
+  var reqBtn = document.getElementById("reqBtn");
+  if (reqBtn) {
+    reqBtn.addEventListener("pointerdown", () => {
+      reqBtn.classList.remove("press");
+      void reqBtn.offsetWidth;
+      reqBtn.classList.add("press");
+      setTimeout(() => reqBtn.classList.remove("press"), 340);
+    });
+    reqBtn.addEventListener("click", async () => {
+      await copyText(LIBRARY_RECORD_REQUIREMENT, "\u600E\u4E48\u8BB0\u5F55\u8FDB\u5171\u4EAB\u5E93");
+      if (reqBtn.classList.contains("done")) return;
+      const old = reqBtn.innerHTML;
+      reqBtn.classList.add("done");
+      reqBtn.innerHTML = '<svg class="tick" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      setBotState("burst", clock);
+      setTimeout(() => {
+        reqBtn.classList.remove("done");
+        reqBtn.innerHTML = old;
+      }, 1500);
+    });
   }
   var toastEl = null;
   var toastTimer = 0;
@@ -4989,8 +5170,11 @@
       const p = byKey(view.proj);
       if (p) {
         p.tasks = [];
+        p.fromDb = false;
         loadTasks(view.proj);
       }
+    } else {
+      libraryDirty = true;
     }
     const key = String(d?.kind || "");
     const label = KIND_TEXT[key] || (key ? key.replace(/_/g, " ") : "\u6570\u636E\u6709\u66F4\u65B0");

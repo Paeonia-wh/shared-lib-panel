@@ -181,6 +181,26 @@ html, body {
 .btn:active { transform: scale(.97); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--ink-3); padding: 6px 8px; }
 .btn-ghost:hover { background: rgba(11,11,14,.05); color: var(--ink); border-color: transparent; }
+
+/* 「怎么记录进共享库」按钮（标题栏，图钉左边）
+   用幽灵样式：和图钉的实心黑并排 → 一实一虚，不打架。
+   交互沿用本项目已实现的动效词汇（①过冲回弹 / ③指尖涟漪 / ⑤笔画勾选），
+   另加一个②果冻压扁 —— 那是这套设计里唯一还没用上的、适合小按钮的动效。
+   （④粒子绽放没用在这里：球在复制成功时已经炸过一次，按钮再炸就重复了，
+    而且标题栏只有 22px 高，粒子会飞出面板边界。） */
+.btn-req { position: relative; overflow: hidden; }
+/* ② 果冻：按下时图标沿 Y 轴压扁再回弹，形变跟着按下的方向走 */
+.btn-req.press .ic { animation: jellyIcon .34s cubic-bezier(.34,1.56,.64,1); }
+@keyframes jellyIcon {
+  0%   { transform: scaleY(1)   scaleX(1); }
+  35%  { transform: scaleY(.72) scaleX(1.16); }   /* 压扁：横向补一点，体积守恒的感觉 */
+  70%  { transform: scaleY(1.1) scaleX(.95); }    /* 回弹：过冲 */
+  100% { transform: scaleY(1)   scaleX(1); }
+}
+/* ⑤ 复制成功：图标变绿并画一笔勾（和图钉同尺寸，所以不加文字） */
+.btn-req.done { color: #fff; background: var(--green); border-color: var(--green); }
+.btn-req.done .ic { display: none; }
+.btn-req .tick { width: 14px; height: 14px; display: block; margin: 0; }
 .btn-primary { background: var(--ink); border-color: var(--ink); color: #fff; }
 .btn-primary:hover { background: #000; border-color: #000; color: #fff; }
 
@@ -268,7 +288,12 @@ html, body {
 .b-done { color: var(--ink-3); }
 .b-idle { color: var(--amber); }
 
-.card-meta { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 10.5px; color: var(--ink-3); }
+.card-meta { margin-top: 8px; font-size: 10.5px; color: var(--ink-3); }
+/* 固定两行：第一行放计数，第二行放产出/图谱。
+   为什么固定 —— 挤成一行会自由换行，"12 个产出" 被拆成 "12 / 个产出 / 图谱 / 12 / 节点"
+   竖着排，把卡片撑得又高又丑（2026-09-15 用户反馈）。 */
+.card-meta .mr { display: flex; align-items: center; gap: 8px; }
+.card-meta .mr + .mr { margin-top: 3px; }
 .bar { flex: 1; height: 2px; border-radius: 99px; background: rgba(11,11,14,.08); overflow: hidden; }
 .bar i { display: block; height: 100%; border-radius: 99px; background: var(--ink); transition: width .5s var(--ease-ios); }
 .bar.ready i { background: var(--green); }
@@ -281,6 +306,19 @@ html, body {
 .cells .c.doing { background: var(--blue); }
 .cells .c.blocked { background: rgba(11,11,14,.17); }
 .meta-ready { color: var(--green); font-weight: 600; }
+/* 产出数 / 代码地图规模（2026-09-15 加）。
+   为什么要有：面板的"进度"只数任务 —— 一个大任务里干了一周的活，进度条不动，
+   看起来像没干。产出数（artifacts）和图谱规模（map_nodes）是库里本来就有的、
+   能反映工作量的东西，亮出来才看得见。做得比 normal 更淡：它不催你干活，只是让你看得见。 */
+/* 产出数 / 图谱规模：图标 + 数字，不放文字 —— 文字太长会把行挤断。
+   完整说法在 title 里（悬停看"12 个产出（会话发布过的交付物）· 代码地图 44 节点…"）。
+   比正常更淡：它不催你干活，只是让你看得见工作量（进度条只数任务，数不出这些）。 */
+.meta-extra {
+  display: inline-flex; align-items: center; gap: 3px;
+  color: var(--ink-3); opacity: .8; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.meta-extra .ic { width: 11px; height: 11px; flex: none; }
 
 .tags { display: flex; gap: 4px; margin-top: 7px; flex-wrap: wrap; }
 .tag {

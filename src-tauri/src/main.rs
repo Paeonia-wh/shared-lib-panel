@@ -195,12 +195,30 @@ async fn qdata() -> Result<String, String> {
                    count(t.id)::int AS total,
                    count(*) FILTER (WHERE t.status = 'done')::int AS done,
                    count(*) FILTER (WHERE t.status = 'pending' AND t.owner_session_id IS NULL)::int AS ready,
-                   count(*) FILTER (WHERE t.owner_session_id IS NOT NULL AND t.status <> 'done')::int AS doing,
-                   count(*) FILTER (WHERE t.status IN ('failed','cancelled'))::int AS failed,
+                   /* 在做 = 标了 running 的（不管有没有主）+ 有主且未完成的。
+                      原来只写了后半句，于是"标了 running 但还没认领"的任务不计入在做，
+                      面板的进度数字会和任务卡自相矛盾 —— 平台的白名单里 running 是合法值。 */
+                   count(*) FILTER (WHERE t.status = 'running'
+                                      OR (t.owner_session_id IS NOT NULL AND t.status <> 'done'))::int AS doing,
+                   /* 待验收（review）单独一档，不算待开始也不算在做 —— 它是等别人验，不是等自己做 */
+                   count(*) FILTER (WHERE t.status = 'review')::int AS review,
+                   /* 没闲着 = 平台白名单里剩下那些（blocked / failed / cancelled）**且没有主**。
+                      两个要点：
+                      ① 原来只统计 failed|cancelled，于是 blocked 的任务不属于任何一桶 ——
+                         16 个任务只算到 15 个，进度数字和任务卡自相矛盾（实测 rural-1-39 撞到）。
+                      ② 必须排掉"有主"的，否则和上面「在做」重叠：一个 blocked 且有主的任务
+                         会被两边各算一次（实测算出 17 > 总数 16）。
+                      加上 owner IS NULL 后五桶严格互斥且完备：
+                         done(任意) + doing(running 或有主未完成) + review + ready + failed(无主的其余) = total */
+                   count(*) FILTER (WHERE t.status IN ('blocked','failed','cancelled')
+                                      AND t.owner_session_id IS NULL)::int AS failed,
                    (SELECT count(*) FROM agent_code_nodes n WHERE n.project_id = p.id)::int AS map_nodes,
                    (SELECT count(*) FROM agent_code_edges e WHERE e.project_id = p.id)::int AS map_edges,
                    (SELECT count(*) FROM agent_artifacts a WHERE a.project_id = p.id)::int AS artifacts,
-                   (SELECT count(*) FROM agent_sessions s WHERE s.project_id = p.id)::int AS sessions
+                   (SELECT count(*) FROM agent_sessions s WHERE s.project_id = p.id)::int AS sessions,
+                   /* 最新任务时间（无任务时给空串）。前端指纹要比它 —— 见下面 json 里的注释。 */
+                   COALESCE(to_char((SELECT max(t2.updated_at) FROM agent_tasks t2 WHERE t2.project_id = p.id)
+                                    AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD"T"HH24:MI:SS'), '') AS task_updated_at
             FROM agent_projects p
             LEFT JOIN agent_tasks t ON t.project_id = p.id
             GROUP BY p.id, p.project_key, p.name, p.kind, p.control_state, p.tags, p.scope, p.root_path, p.updated_at
@@ -222,11 +240,15 @@ async fn qdata() -> Result<String, String> {
                 "done": r.get::<_, i32>("done"),
                 "ready": r.get::<_, i32>("ready"),
                 "doing": r.get::<_, i32>("doing"),
+                "review": r.get::<_, i32>("review"),
                 "failed": r.get::<_, i32>("failed"),
                 "map_nodes": r.get::<_, i32>("map_nodes"),
                 "map_edges": r.get::<_, i32>("map_edges"),
                 "artifacts": r.get::<_, i32>("artifacts"),
                 "sessions": r.get::<_, i32>("sessions"),
+                /* 该项目下最新的任务更新时间。给前端的指纹比对用：
+                   只含计数的话，改了任务说明/状态（而计数没变）面板会判定"没变化"而不重绘。 */
+                "task_updated_at": r.get::<_, String>("task_updated_at"),
             })
         }).collect();
 

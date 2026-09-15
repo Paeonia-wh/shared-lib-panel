@@ -443,7 +443,7 @@ swatchesEl.addEventListener('click', (e) => {
 renderAutoSwatch()
 
 /* ============ 数据：项目 → 任务 ============ */
-type TaskStatus = 'ready' | 'doing' | 'done' | 'blocked'
+type TaskStatus = 'ready' | 'doing' | 'review' | 'done' | 'blocked'
 type Task = {
   key: string; title: string; status: TaskStatus; pri: number; owner?: string; depends?: string[]
   raw?: string           /* 库里原始状态，用于区分「真被卡住」和「只是有依赖」 */
@@ -454,9 +454,10 @@ type Proj = {
   key: string; name: string; sub: string; tags: string[]; ago: string
   scope?: string         /* 库里的项目一句话定位（每个项目都有） */
   tasks: Task[]
-  total: number; done: number; ready: number; doing: number; failed: number
+  total: number; done: number; ready: number; doing: number; failed: number; review?: number
   kind: string; isTest: boolean; ctrl: string; root: string
   mapNodes: number; mapEdges: number; artifacts: number; sessions: number
+  taskUpdatedAt?: string   /* 该项目下最新的任务更新时间：指纹要比它，否则改了任务说明却不重绘 */
   fromDb?: boolean          /* 任务明细是否来自数据库（false/undefined = 还是演示数据）*/
 }
 type Group = { title: string; folded?: boolean; items: Proj[] }
@@ -546,10 +547,11 @@ function applyProjects(list: any[]): void {
       ago: relTime(r.updated_at),
       tasks: (prev.get(r.project_key)?.fromDb ? prev.get(r.project_key)!.tasks : []),
       fromDb: false,
-      total: r.total, done: r.done, ready: r.ready, doing: r.doing, failed: r.failed,
+      total: r.total, done: r.done, ready: r.ready, doing: r.doing, failed: r.failed, review: num(r.review),
       kind: r.kind, isTest: isTestish(r.project_key, r.name || ''),
       ctrl: r.control_state, root: r.root_path,
       mapNodes: r.map_nodes, mapEdges: r.map_edges, artifacts: r.artifacts, sessions: r.sessions,
+      taskUpdatedAt: String(r.task_updated_at || ''),
     }))
   const live = items.filter((r) => !r.isTest)
   const test = items.filter((r) => r.isTest)
@@ -560,7 +562,13 @@ function applyProjects(list: any[]): void {
   ].filter((g) => g.items.length > 0)
   rebuildAll()
   everLoaded = true
-  const fp = JSON.stringify(items.map((r) => [r.key, r.total, r.done, r.ready, r.doing, r.failed, r.ago]))
+  /* 指纹要含**真正会变**的东西。
+     原来只有计数和 ago（由 project.updated_at 推出来的相对时间），于是
+     "只改了任务说明/状态、计数没变"的情况会被判定成没变化 → 不重绘（实测踩到过）。
+     补上 project.updated_at 和该项目最新的 task.updated_at。 */
+  const fp = JSON.stringify(items.map((r) => [
+    r.key, r.total, r.done, r.ready, r.doing, r.failed, r.ago, r.taskUpdatedAt,
+  ]))
   if (fp === lastFingerprint) return
   lastFingerprint = fp
   if (open) renderProjects(); else renderStats()
@@ -584,7 +592,13 @@ export async function loadTasks(key: string): Promise<void> {
         /* 只有"未完成的前置"才算被卡住。
            以前用 deps（总前置数），导致前置全做完的任务永远显示成等待中
            —— 对账发现 cross-consistency 的 5 个前置全 done 了还被标卡住。 */
-        : (t.owner ? 'doing' : (t.unmet_deps > 0 ? 'blocked' : 'ready')),
+        /* 平台白名单里 status 还可以是 running 和 review，这两个原来都没有分支
+         （和之前 blocked 被降级是同一个毛病）：
+         running = 明确在做 → 进行中，不管有没有主（标了 running 说明有人在推）
+         review  = 待验收 → 单独一档 */
+      : t.status === 'running' ? 'doing'
+      : t.status === 'review' ? 'review'
+      : (t.owner ? 'doing' : (t.unmet_deps > 0 ? 'blocked' : 'ready')),
       raw: t.status,
       pri: typeof t.priority === 'number' ? t.priority : 9,
       owner: t.owner ? String(t.owner).replace(/^session-/, '').slice(0, 12) : undefined,
@@ -642,6 +656,9 @@ function parseTags(raw: string): string[] {
 
 let liveGot = false
 let lastFingerprint = ''
+/* 库里有过变更、但当时没在看任务明细 → 标记为脏，下次点进项目重新拉。
+   没有它的话，面板关着期间库里改了任务，点开看到的是内存里的旧数据。 */
+let libraryDirty = false
 /* 全部用 PostgreSQL 里的真值（不再猜） */
 const num = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0)
 const totalOf = (p: Proj) => num(p.total)
@@ -649,6 +666,7 @@ const doneOf = (p: Proj) => num(p.done)
 const readyOf = (p: Proj) => num(p.ready)
 const doingOf = (p: Proj) => num(p.doing)
 const failedOf = (p: Proj) => num(p.failed)
+const reviewOf = (p: Proj) => num(p.review)      /* 待验收：等别人验，不是等自己做 */
 /** 有主但没完成 = 在做；加上失败/取消的也算"没闲着" */
 const inFlightOf = (p: Proj) => doingOf(p) + failedOf(p)
 const prog = (p: Proj) => ({ done: doneOf(p), total: totalOf(p) })
@@ -656,13 +674,16 @@ const prog = (p: Proj) => ({ done: doneOf(p), total: totalOf(p) })
 function taskLabel(t: Task): { cls: string; label: string; icon: string } {
   if (t.status === 'done') return { cls: 'b-done', label: '已完成', icon: 'i-done' }
   if (t.status === 'doing') return { cls: 'b-doing', label: '进行中', icon: 'i-doing' }
+  /* 平台白名单里的 review（待验收）：等别人验，不是等自己做 —— 单独一档 */
+  if (t.status === 'review') return { cls: 'b-ready', label: '待验收', icon: 'i-ready' }
   if (t.status === 'blocked') return { cls: 'b-idle', label: '等待中', icon: 'i-wait' }
   return { cls: 'b-ready', label: '待开始', icon: 'i-ready' }
 }
 function projState(p: Proj): { cls: string; label: string; icon: string } {
   if (p.total === 0) return { cls: 'b-idle', label: '未拆解', icon: 'i-tasks' }
   if (p.done === p.total) return { cls: 'b-done', label: '已完成', icon: 'i-done' }
-  if (doingOf(p) > 0) return { cls: 'b-doing', label: '进行中', icon: 'i-doing' }
+  /* 有任务在做、或有待验收的 —— 都说明这个项目还在推进，别显示成等待中 */
+  if (doingOf(p) > 0 || reviewOf(p) > 0) return { cls: 'b-doing', label: '进行中', icon: 'i-doing' }
   if (readyOf(p) > 0) return { cls: 'b-ready', label: '待开始', icon: 'i-ready' }
   return { cls: 'b-idle', label: '等待中', icon: 'i-wait' }
 }
@@ -706,10 +727,16 @@ export function statusLine(p: Proj, t: Task): string {
 }
 
 export function projBlock(p: Proj, t?: Task): string {
+  const info = projInfo(p)
+
   if (t) {
     const body: string[] = []
-    body.push(`【继续做 · ${p.name} / ${t.key}】`)
-    if (p.scope) body.push(`项目：${p.scope}`)
+    /* 已完成的任务不能再说"继续做"（2026-09-15 修）。
+       原来 done 的任务也走同一分支：抬头写"继续做"、还逼它读知识图谱、回写库里 ——
+       新会话可能把一个已经收口的活重新开工。done 是"看交接"，不是"接着做"。 */
+    const isDone = t.status === 'done'
+    body.push(isDone ? `【已完成 · ${p.name} / ${t.key}】` : `【继续做 · ${p.name} / ${t.key}】`)
+    body.push(...info)
     body.push('')
     body.push(`任务：${t.title}`)
     body.push(`状态：${statusLine(p, t)}`)
@@ -717,35 +744,91 @@ export function projBlock(p: Proj, t?: Task): string {
     body.push('')
     if (t.desc) {
       body.push('接续说明（库里原始记录，含别人踩过的坑）：')
-      body.push(t.desc)
+      /* 超长说明截断：原样粘进对话框会变成一大块，用户在输入框里没法核对 */
+      const DESC_MAX = 1200
+      if (t.desc.length > DESC_MAX) {
+        body.push(t.desc.slice(0, DESC_MAX))
+        body.push(`……（说明过长已截断，完整 ${t.desc.length} 字请用 project_context_pack 或直接看 task.description）`)
+      } else {
+        body.push(t.desc)
+      }
     } else {
-      body.push('接续说明：库里这个任务没写说明 —— 动手前请先读上下文，顺手把说明补上。')
+      /* 原来写的是"顺手把说明补上" —— 但平台根本不接受改 description（update_task 只吃
+         status/next_action/summary），等于指了一条不存在的路。改成能真正做到的事。 */
+      body.push('接续说明：库里这个任务没写说明，能继承的只有上面这些。')
+      body.push('  读了上下文后，把你查到的背景和踩到的坑写进检查点的 pitfalls / completed；')
+      body.push('  顺带回报一句"这个任务的说明是空的"（description 创建时写死，改不了）。')
     }
     if (t.nextAct) {
       body.push('')
       body.push(`上一步留下的交代：${t.nextAct}`)
     }
-    if (t.status === 'blocked' && unmetDeps(p, t).length) {
+
+    /* blocked 要分开说（2026-09-15 修）。
+       原来只在"有未完成前置"时才提醒，于是"等客户/等资质"那类 blocked
+       一句提示都没有，新会话看不到为什么卡住，可能硬开工。 */
+    if (t.status === 'blocked') {
+      const waiting = unmetDeps(p, t)
       body.push('')
-      body.push('注意：这个任务当前被卡住，动手前先确认前置条件是否已经解开。')
+      if (waiting.length) {
+        body.push(`注意：库里标了 blocked，而且前置「${waiting.join('、')}」还没完成 —— 现在别开工。`)
+      } else {
+        body.push('注意：库里标了 blocked，但**没有未完成的前置** —— 说明卡的是外部原因（等人/等资质/等决定）。')
+        body.push('  别自己想办法绕过去，先把"到底在等谁"问清楚再动手。')
+      }
+      const dangling = danglingDeps(p, t)
+      if (dangling.length) {
+        body.push(`另外：前置「${dangling.join('、')}」在当前库里查不到（可能已删/改名/属于别的项目）—— 先问清楚，别猜。`)
+      }
     }
+
+    if (isDone) {
+      /* 已收口：只讲怎么接手看，不让它重做 */
+      body.push('')
+      body.push('这个任务已经标记完成了。如果你是想**了解它做了什么**，读上面这些就够了；')
+      body.push('如果你觉得还得继续做，先说清楚原因，别直接把状态改回去重开。')
+      body.push(`想拿完整上下文：project_task_dispatch(project="${p.key}", task_key="${t.key}") 拿 id → project_context_pack。`)
+      return body.join('\n')
+    }
+
     body.push('')
-    body.push('执行要求：')
-    body.push(`  1) 先 project_context_pack(project="${p.key}", task_id="${t.key}") 读全上下文。`)
-    body.push(...mapRequirement(p))
-    body.push('  3) 收尾把结论自动写回库里：project_checkpoint + project_artifact_publish + project_task_update。')
-    body.push('  4) 哪些该你自己定、哪些该来问我，你自己判断 —— 但别让下个会话把同样的事再问一遍。')
+    body.push('执行要求（顺序别换 —— 换错一步会把自己锁死，见第 4 条）：')
+    body.push(`  1) 先登记并领任务，拿到它的 id（注意：**id 不是下面这个 key**，是库里 32 位 uuid）：`)
+    body.push(`     project_task_dispatch(project="${p.key}", task_key="${t.key}")   ← 返回里找 id`)
+    body.push(`     不领就直接干的话，你发不了产出、最后也标不了完成（那两件事都要求"任务在你名下"）。`)
+    body.push(`  2) 用那个 id 读上下文：project_context_pack(project="${p.key}", task_id="<上一步的 id>")`)
+    body.push('     验收标准以里面的 Objective / Acceptance 为准；这两个是空的就自己写出验收标准并回写。')
+    body.push(...mapRequirement(p, '3'))
+    body.push('  4) 干活。**收尾顺序也不能换**：')
+    body.push('     a. project_checkpoint(project=…, task_id=<id>, state={completed/not_done/pitfalls/blockers/next_action})')
+    body.push('     b. project_artifact_publish(project=…, task_id=<id>, kind="doc", path="<真实存在的文件的绝对路径>", revision="<7位以上git短SHA>")')
+    body.push('        ⚠ 必须是你自己名下的任务才能发；路径必须落在项目目录内且文件真的存在。')
+    body.push('     c. project_task_update(project=…, task_id=<id>, status="done", next_action="下一步")')
+    body.push('     d. 代码地图要更新的话，放在**最后**（它要求你手里还有 running 任务，先标 done 就写不进去了）')
+    body.push(...discipline())
+    body.push('  哪些该你自己定、哪些该来问我，你自己判断 —— 但别让下个会话把同样的事再问一遍。')
     return body.join('\n')
   }
 
   /* 项目层：项目现状简报（多任务项目卡）+ 单任务项目卡 */
   const body: string[] = []
   body.push(`【继续做 · ${p.name}】`)
-  if (p.scope) body.push(`项目：${p.scope}`)
+  body.push(...info)
   body.push('')
-  body.push(`进度：${p.done}/${p.total} 已完成${p.ready ? ` · ${p.ready} 个待开始` : ''}${p.doing ? ` · ${p.doing} 个在做` : ''}`)
+  /* 进度行要说全。原来只列"已完成 / 待开始 / 在做"，于是会出现
+     "3/7 已完成 · 2 个待开始" 这种数字加不到总数上、看着像自相矛盾的情况。
+     按五桶口径列全（为 0 的不列），跟后端统计 SQL 一一对应。 */
+  const pbits: string[] = [`${p.done}/${p.total} 已完成`]
+  if (p.doing) pbits.push(`${p.doing} 个在做`)
+  if (p.review) pbits.push(`${p.review} 个待验收`)
+  if (p.ready) pbits.push(`${p.ready} 个待开始`)
+  if (p.failed) pbits.push(`${p.failed} 个卡住/失败`)
+  body.push(`进度：${pbits.join(' · ')}`)
   body.push('')
-  /* 按状态分组列出，让人一眼看出哪些能接、哪些被卡住 */
+  /* 按状态分组列出，让人一眼看出哪些能接、哪些被卡住。
+     分组必须和上面那行五桶口径一一对应 —— 原来没有「待验收」组，
+     于是统计说"N 个待验收"、明细里却一个都找不到，数字和明细对不上。 */
+  const shown: string[] = []
   const group = (title: string, list: Task[]) => {
     if (!list.length) return
     body.push(`${title}：`)
@@ -753,20 +836,99 @@ export function projBlock(p: Proj, t?: Task): string {
       const dep = x.depends?.length ? `（等 ${x.depends.join('、')}）` : ''
       const who = x.owner ? `（${x.owner}）` : ''
       body.push(`  · ${x.key} —— ${x.title}${dep}${who}`)
+      shown.push(x.key)
     }
   }
   group('还没人领', p.tasks.filter((x) => x.status === 'ready'))
   group('正在做', p.tasks.filter((x) => x.status === 'doing'))
+  group('待验收', p.tasks.filter((x) => x.status === 'review'))
   group('被卡住', p.tasks.filter((x) => x.status === 'blocked'))
-  group('已完成', p.tasks.filter((x) => x.status === 'done'))
-  body.push('')
-  body.push('要接着做，请先说清楚做哪个任务 —— 每个任务卡上都能单独复制接续块，')
-  body.push('里面带着那个任务的完整交接说明（含别人踩过的坑）。')
+  /* 已完成只列最近 5 个：50 个任务的项目全列会有 50 行 / 约 2500 字，
+     把"待办"和"档案"混在一起，反而看不清该接哪个。 */
+  const doneAll = p.tasks.filter((x) => x.status === 'done')
+  const DONE_SHOW = 5
+  if (doneAll.length) {
+    body.push('已完成：')
+    for (const x of doneAll.slice(0, DONE_SHOW)) {
+      body.push(`  · ${x.key} —— ${x.title}`)
+      shown.push(x.key)
+    }
+    if (doneAll.length > DONE_SHOW) {
+      body.push(`  （另有 ${doneAll.length - DONE_SHOW} 个已完成没列出来，需要时用 project_overview 查）`)
+    }
+  }
+  /* 兜底：库里可能有面板分组之外的状态（比如 failed / cancelled 被归进「没闲着」）。
+     列不出来就明确说一句，别让数字和明细对不上。 */
+  const rest = p.tasks.filter((x) => !shown.includes(x.key))
+  if (rest.length) {
+    body.push(`其他状态 ${rest.length} 个：${rest.map((x) => `${x.key}（${x.status}）`).join('、')}`)
+  }
   body.push('')
   body.push('执行要求：')
-  body.push(`  1) 先 project_context_pack(project="${p.key}") 读全上下文。`)
-  body.push(...mapRequirement(p))
+  body.push(`  1) 先看项目现状：project_overview(project="${p.key}") 拿任务清单和最近事件。`)
+  body.push(...mapRequirement(p, '2'))
+  body.push(`  3) 本会话没指定做哪个任务的话，别回来问 —— 直接查可领的：`)
+  body.push(`     project_ready_tasks(project="${p.key}")，挑一个"还没人领"的，`)
+  body.push(`     然后 project_task_dispatch(project="${p.key}", task_key="<挑中的那个>") 领走并拿到 id。`)
+  body.push('     上面每个任务卡也能单独复制接续块，里面带着那个任务的完整交接说明。')
+  body.push(...discipline())
   return body.join('\n')
+}
+/* ============================================================
+   复制块用的公共片段
+   ============================================================
+   这一段里的每句话都对着共享库的**真实实现**核过（2026-09-15，两轮独立评审 + 逐条实测）。
+   踩过/修过的坑，写在这里免得后人再犯：
+
+   · task_id 不是 task_key！服务端 _task() 只按 `WHERE id=%s` 查，id 是 32 位 uuid。
+     原来复制块写 `task_id="${t.key}"`，会话照抄第一步就 `Task not found: consent-policy`。
+   · 顺序不能换：先 update(status=done) 会连带补空壳检查点 + 抓 git baseline + 导出投影，
+     而且代码地图写入要求"手里有 running/review 任务" —— 先标 done 就再也写不了地图。
+   · 产出归属：artifact_publish 硬门禁要求"任务在自己名下"，没领过就发不出。
+   · "只写检查点面板不会变"是错的：checkpoint 带 next_action 时会一并
+     UPDATE agent_tasks.next_action + updated_at，而 next_action 就是面板显示的"下一步"。
+   · DSH 侧的桥没暴露 project_task_create / project_plan_review（会 ToolUnavailable），
+     所以"建任务"这条路对 DSH 会话来说只有 propose → 别人审批。
+   · project_context_pack 的 task_id 是**必填位置参数**，只传 project 直接 TypeError。
+   ============================================================ */
+
+function repoLine(p: Proj): string[] {
+  const root = (p.root || '').trim()
+  return root ? [`仓库：${root}`] : ['仓库：库里没登记这个项目的代码目录（先用 project_for_path 确认工作目录）']
+}
+
+/* 项目描述。scope 为空时给一句兜底，别让新会话只看一个项目名就开始猜。 */
+function projInfo(p: Proj): string[] {
+  const scope = (p.scope || '').trim()
+  return scope
+    ? [`项目：${scope}`, ...repoLine(p)]
+    : [`项目：库里没写这个项目的 scope —— 先用 project_overview(project="${p.key}") 搞清楚它是什么再动手。`, ...repoLine(p)]
+}
+
+/* 前置依赖里，哪些是库里**真实存在的任务**、哪些只是写在名字上。
+   判断依据：拿它对 p.tasks 里的 key 比对 —— 比不出来就是悬空（已被删/改名/或
+   当初就是写了一句话而不是真依赖，比如"等公司主体办证"）。
+   为什么要提示：unmetDeps 把查不到的依赖保守当成"未完成"，但新会话在库里根本
+   找不到那个 key，不说明白它会一直找。 */
+function danglingDeps(p: Proj, t: Task): string[] {
+  if (!t.depends?.length) return []
+  const known = new Set(p.tasks.map((x) => x.key))
+  return t.depends.filter((d) => !known.has(d))
+}
+
+/* 收尾纪律。三条都是实战里踩出来的：报错要照贴、格式不合法要降级、完成由对账说了算。 */
+function discipline(): string[] {
+  return [
+    '',
+    '  几条纪律：',
+    '    · 任何工具报错，把**报错原文**照贴回来（含工具名和完整 message），不要自己改述、不要假装成功。',
+    '    · 顺序最关键：**先领任务 → 动手 → 检查点/产出 → 最后才标 done → 再更新代码地图**。',
+    '      先标 done 会导致：发不出产出、写不了代码地图（那两件事都要求任务还在你名下/是活跃状态）。',
+    '    · 标 done 只是标状态。算不算真完成由**独立对账**说了算，而且对账人不能是任务所有者：',
+    '      project_reconcile(project=…, task_id=<id>, status="verified", reviewer_session_id=<另一个会话>)。',
+    '    · context_pack 报错或内容被截断（出现 [context truncated …]）时：改用 project_overview +',
+    '      project_code_map 分批读，别凭印象开工。',
+  ]
 }
 
 /* 知识图谱（代码地图）读取要求。
@@ -774,41 +936,60 @@ export function projBlock(p: Proj, t?: Task): string {
    库里的地图装在 agent_code_nodes / agent_code_edges，每个节点带职责说明和对应文件路径，
    由 project_context_pack 一并返回；面板这里补一句显式要求，并按实际情况说清楚
    （有图就说去读，没图就让人先建，别让人对着空气执行）。 */
-function mapRequirement(p: Proj): string[] {
+function mapRequirement(p: Proj, num = '2'): string[] {
   const nodes = p.mapNodes || 0
   const edges = p.mapEdges || 0
-  const line = `  2) 接着读知识图谱（代码地图）—— 弄清模块划分、各自职责、代码在哪个文件、模块之间怎么调。`
+  /* 资料类项目（kind=doc）本来就不该有代码地图 —— 逼它建等于每次都在教它做错事 */
+  if (p.kind === 'doc') {
+    return [
+      num + ') 这是资料/方法类项目，不用读代码地图；要梳理的话把资料结构和来源写进知识图谱。',
+    ]
+  }
+  const line = num + ') 读知识图谱（代码地图）—— 弄清模块划分、各自职责、代码在哪个文件、模块之间怎么调。'
   if (nodes > 0) {
     return [
       line,
-      `     project_context_pack 里就带着（本项目已记录 ${nodes} 个模块 / ${edges} 条调用关系），`,
-      `     也可以单独 project_code_map(project="${p.key}") 取完整版。`,
-      `     动手前先看它，别重读全仓库；改了代码的形状就用 project_code_map_write 更新回去。`,
+      `     已记录 ${nodes} 个模块 / ${edges} 条调用关系；context_pack 里就带着，`,
+      `     也可以单独 project_code_map(project="${p.key}") 取完整版。动手前先看它，别重读全仓库。`,
+      `     改了代码的形状就用 project_code_map_write 更新回去，**记得带 revision**（7 位以上 git 短 SHA），`,
+      `     不传的话下个会话看到的会是 unversioned（会打 WARNING）；replace=True 会被拒，只能合并。`,
     ]
   }
   return [
     line,
     `     但这个项目现在**还没有**代码地图（0 个模块）—— 读不到东西。`,
-    `     所以请顺手做一件事：读一遍代码后用 project_code_map_write 把地图建起来`,
-    `     （模块 / 职责 / 文件路径 / 调用关系），下个会话才不用重读全仓库。`,
+    `     所以顺手做一件事：读一遍代码后用 project_code_map_write 把地图建起来`,
+    `     （模块 / 职责 / 文件路径 / 调用关系 + revision），下个会话才不用重读全仓库。`,
   ]
 }
 
 export function splitBlock(p: Proj): string {
   const body: string[] = []
   body.push(`【拆解 ${p.name}】`)
-  if (p.scope) body.push(`项目：${p.scope}`)
+  body.push(...projInfo(p))
   body.push('')
   body.push('这个项目还没有拆任务。')
   body.push('执行要求：')
-  body.push(`  1) 先 project_context_pack(project="${p.key}") 读上下文。`)
-  body.push(...mapRequirement(p))
-  body.push('  3) 把它规划成几个任务/模块：每个任务写清楚要交什么（验收标准），用 project_task_create 写进共享库。')
-  body.push('  4) 拆完告诉我拆成了哪几块，我自己找人做 —— 不要自己开子会话分派任务。')
+  body.push(`  1) 先看现状：project_overview(project="${p.key}") 拿项目图和最近事件。`)
+  body.push(...mapRequirement(p, '2'))
+  body.push('  3) 先判断这个项目**要不要**拆任务：')
+  body.push('     · 要写代码/要做功能 → 拆成若干任务，每个写清"要交什么"（验收标准）。')
+  body.push('     · 纯资料/纯记录类 → 不用拆，把资料结构和来源整理进知识图谱就行，别硬造任务。')
+  body.push('  4) **建之前先查重**：project_overview 看一眼已有任务，别和现有的重了 ——')
+  body.push('     同一个 key 建第二次会直接报 Task already exists；但换个 key 建同一件事不会报，')
+  body.push('     只会让库里多一张重复卡（本会话就干过一次，靠事后核对才发现）。')
+  body.push('  5) 要拆的话，注意建任务这条路分两种情况（先确认是哪一种，别撞墙）：')
+  body.push(`     · 先 project_session_register(project="${p.key}", provider="<你的 provider>", model="<你的 model>") 登记自己；`)
+  body.push('       没登记的话后面所有写操作都会因为"会话不在这个项目里"而失败。')
+  body.push('     · 项目计划没锁 → 直接用 project_task_create(project=…, task_key=…, title=…, description=…, priority=…)。')
+  body.push('     · 项目计划已锁（报 "initial plan is locked"）→ 只能提案，不能直接建：')
+  body.push('       project_plan_propose(project=…, reason=…, changes=[{operation:"add_task", task_key:…, title:…, description:…, priority:…}])')
+  body.push('       然后**请用户或另一个会话**去审批（project_plan_review）——')
+  body.push('       规则是"提议者不能审自己的提案"，而且 DSH 侧的桥没暴露 review 工具，你自己批不了。')
+  body.push('  6) 拆完把结果告诉我：拆成了哪几块。**不要自己开子会话分派任务** —— 我自己找人做。')
+  body.push(...discipline())
   return body.join('\n')
 }
-
-/* ============ ⑦ 数字缓停 ============ */
 const countRafs = new Map<HTMLElement, number>()
 function countTo(el: HTMLElement, to: number, dur = 520) {
   const prev = countRafs.get(el)
@@ -828,9 +1009,11 @@ let lastStatsKey = ''
 function renderStats() {
   const scope: Proj[] = view.kind === 'projects' ? ALL : [byKey(view.proj)]
   const sumOf = (f: (p: Proj) => number) => scope.reduce((n, p) => n + f(p), 0)
-  const items = view.kind === 'projects'
-    ? [[ALL.length, '个项目'], [sumOf(readyOf), '待开始'], [sumOf((p) => (inFlightOf(p) > 0 ? 1 : 0)), '进行中']]
-    : [[totalOf(scope[0]), '个任务'], [sumOf(doneOf), '已完成'], [sumOf(readyOf), '待开始']]
+  /* 统计条：五桶口径（进行中 / 待开始 / 待验收）—— 和后端 SQL 的桶一一对应，
+     数字和任务卡永远一致。待验收（review）单独一列：它是等别人验，不是等自己做。 */
+  const items: [number, string][] = view.kind === 'projects'
+    ? [[ALL.length, '个项目'], [sumOf((p) => (inFlightOf(p) > 0 ? 1 : 0)), '进行中'], [sumOf(readyOf), '待开始'], [sumOf(reviewOf), '待验收']]
+    : [[totalOf(scope[0]), '个任务'], [sumOf(doneOf), '已完成'], [sumOf((p) => inFlightOf(p)), '进行中'], [sumOf(readyOf), '待开始'], [sumOf(reviewOf), '待验收']]
   const key = items.map(([n, l]) => `${n}:${l}`).join('|')
   if (key === lastStatsKey) return          /* 数值没变：不重建、不重播动画 */
   lastStatsKey = key
@@ -890,22 +1073,39 @@ function sortProjects(items: Proj[]): Proj[] {
 /* 筛选条已按用户要求去掉（2026-09-15）：不再按状态过滤，一律"把任务都列出来"，
    顺序由 buildTaskList() 决定（正在做 → 待开始 → 被卡住 → 已完成）。 */
 
-export function projCard(p: Proj): string {  const st = projState(p)
+export function projCard(p: Proj): string {
+  const st = projState(p)
   const { done, total } = prog(p)
   const pct = total ? Math.round((done / total) * 100) : 0
   const readyN = readyOf(p)
   const single = total === 1
   const empty = total === 0
   const t0 = p.tasks[0]
+
+  /* 产出数 / 代码地图规模：qdata 一直返回，但面板从没显示过。
+     为什么必须显示（2026-09-15 用户提的）：面板的"进度"只数任务，不数提交 ——
+     一个大任务里干了一周的活，进度条纹丝不动，看起来像没干。
+     而共享库本来就有两个能反映工作量的东西：
+       ① artifacts —— 会话发布过的产出（project_artifact_publish）
+       ② map_nodes/map_edges —— 知识图谱规模
+     把它们亮出来，"干了活但没建任务"的情况就看得见了；顺带能一眼看出哪个项目还没建图谱。 */
+  const artN = p.artifacts || 0
+  const mapN = p.mapNodes || 0
+  /* 显示形态：图标 + 数字，不写文字。第一版写成"· 2 个产出 · 图谱 44 节点"，
+     太长，把计数行挤换行、卡片被撑高（用户截图反馈）。完整说法放进 title。 */
+  const extraBits: string[] = []
+  if (artN > 0) extraBits.push(`<span class="meta-extra" title="${artN} 个产出（会话发布过的交付物）"><svg class="ic"><use href="#i-artifact"/></svg>${artN}</span>`)
+  if (mapN > 0) extraBits.push(`<span class="meta-extra" title="代码地图 ${mapN} 节点 / ${p.mapEdges || 0} 条调用关系"><svg class="ic"><use href="#i-graph"/></svg>${mapN}</span>`)
+  const extraRow = extraBits.length ? `<div class="mr">${extraBits.join('')}</div>` : ''
   const meta = total === 0
-    ? `<span>未拆解 · 先用「拆任务」把它拆开</span>`
+    ? `<div class="mr"><span>未拆解 · 先用「拆任务」把它拆开</span></div>${extraRow}`
     : single
-      ? `<span class="meta-ready">${t0 ? taskLabel(t0).label : ''}</span><span>${p.ago}</span>`
-      : `<span class="cells" title="${total} 个任务（已完成 ${done} / 进行中 ${inFlightOf(p)} / 待开始 ${readyN}）">${
+      ? `<div class="mr"><span class="meta-ready">${t0 ? taskLabel(t0).label : ''}</span><span>${p.ago}</span></div>${extraRow}`
+      : `<div class="mr"><span class="cells" title="${total} 个任务（已完成 ${done} / 进行中 ${inFlightOf(p)} / 待验收 ${reviewOf(p)} / 待开始 ${readyN}）">${
           Array(done).fill('<i class="c done"></i>').join('') +
           Array(inFlightOf(p)).fill('<i class="c doing"></i>').join('') +
           Array(readyN).fill('<i class="c ready"></i>').join('')
-        }</span><span>${done}/${total}</span>${readyN ? `<span class="meta-ready">${readyN} 待开始</span>` : ''}<span>${p.ago}</span>`
+        }</span><span>${done}/${total}</span>${readyN ? `<span class="meta-ready">${readyN} 待开始</span>` : ''}<span>${p.ago}</span></div>${extraRow}`
   return `
   <div class="card" data-proj="${p.key}">
     <div class="card-body">
@@ -957,9 +1157,9 @@ function renderProjects() {
 /* 任务列表顺序（用户定案 2026-09-15）：
    正在做 → 待开始 → 被卡住 → 已完成
    "正在进行中最上面，待开始下面，已完成去最下面"。同组内按 priority（数字小的优先=更紧急）。 */
-const TASK_ORDER: Record<TaskStatus, number> = { doing: 0, ready: 1, blocked: 2, done: 3 }
+const TASK_ORDER: Record<TaskStatus, number> = { doing: 0, review: 1, ready: 2, blocked: 3, done: 4 }
 const TASK_GROUP_TITLE: Record<TaskStatus, string> = {
-  doing: '正在做', ready: '待开始', blocked: '被卡住', done: '已完成',
+  doing: '正在做', review: '待验收', ready: '待开始', blocked: '被卡住', done: '已完成',
 }
 const buildTaskList = (tasks: Task[]) =>
   [...tasks].sort((a, b) => (TASK_ORDER[a.status] - TASK_ORDER[b.status]) || (a.pri - b.pri))
@@ -1029,7 +1229,14 @@ async function gotoTasks(key: string) {
     if (h) h.style.viewTransitionName = name
   })
   /* 后台拉任务明细，回来了再刷新这一次视图 */
-  if (!p.tasks.length && p.total > 0) {
+  /* 拉任务明细的时机。
+     原来只有"本地一条都没有"才拉 —— 于是库里改了任务说明/状态之后，
+     点进来看到的还是内存里那份旧的（实测踩到过：检查点写了、任务改了，面板没变）。
+     所以补一个 libraryDirty：库里有过变更就把缓存作废，重新拉一次。 */
+  if ((!p.tasks.length || libraryDirty) && p.total > 0) {
+    p.tasks = []
+    p.fromDb = false
+    libraryDirty = false
     await loadTasks(key)
     if (open && view.kind === 'tasks' && view.proj === key) renderTasks(key)
   }
@@ -1114,6 +1321,70 @@ async function copyText(text: string, what: string) {
     document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove()
   }
   toast(`已复制「${what}」· 粘进任意 agent 对话框`)
+}
+
+/* ============ 标题栏：复制「怎么记录进共享库」 ============
+ *
+ * 为什么要有这个按钮（2026-09-15 用户提的）：
+ * 有会话老老实实写了 project_checkpoint，但面板纹丝不动 —— 因为**检查点不影响面板
+ * 显示的任何字段**（面板读的是任务状态/说明/计数，检查点在另一张表）。
+ * 所以需要一段说明告诉别的会话：面板到底读什么、该把结果记在哪，
+ * 不然它会以为自己白写了。
+ *
+ * 内容不是新编的规矩，而是把库里原有的规定（agents_stub.py 写进各项目 AGENTS.md 的
+ * 「收工前必须写 checkpoint，五项一个都别省」）+ 面板特有的显示规则合并在一起。
+ *
+ * 放在标题栏而不是项目卡上：这段说明是**全局**的（讲机制），不针对某个项目，
+ * 所以不带 project_key；会话自己知道在做哪个项目。
+ */
+const LIBRARY_RECORD_REQUIREMENT = [
+  `【共享项目库 · 记录要求】`,
+  ``,
+  `⚠ 本会话可能做了不止一个任务。每一轮做过的都得记，不能只记最后一轮 ——`,
+  `   库里没有"整场会话"这种记录粒度（检查点必须挂在具体任务上），做了 N 个就记 N 次。`,
+  ``,
+  `【第一步 · 盘点】把本会话从开始到现在做过的任务列一遍。改过代码 / 写过文档 /`,
+  `   查过问题并得出过结论 —— 都算。特别注意没在库里领过的那些（最容易漏）。`,
+  ``,
+  `【第二步 · 逐个闭环】对每一个任务，按这个顺序做（顺序错了会把自己锁死）：`,
+  `   ① project_task_dispatch(project=…, task_key="<任务的 key>") → 拿到 id（32 位 uuid）`,
+  `      ⚠ 后面所有工具要的都是这个 **id**，不是 key —— 传 key 会报 Task not found。`,
+  `      没领过任务的后果：发不出产出、标不了完成（都要求"任务在你名下"）。`,
+  `   ② project_checkpoint(project=…, task_id=<id>, state={...}) —— 五项一个都别省：`,
+  `        completed 完成了什么 / not_done 没完成什么 / pitfalls 踩过的坑（★ 最重要，写具体）`,
+  `        / blockers 卡在什么外部依赖 / next_action 下一步`,
+  `      ⚠ 带 next_action 的检查点会一并更新任务的"下一步"并让面板刷新；不带就不会动面板。`,
+  `   ③ project_artifact_publish(project=…, task_id=<id>, kind="doc", path="<真实文件绝对路径>")`,
+  `      路径必须落在项目目录内、文件必须真的存在，否则当场报错。`,
+  `   ④ project_task_update(project=…, task_id=<id>, status="done", next_action="下一步")`,
+  `   ⑤ 代码地图要更新的话放**最后**（它要求你手里还有活跃任务，先标 done 就写不进去了）。`,
+  ``,
+  `【第三步 · 自检】逐个念一遍：这个任务在库里是 done 了吗？它有检查点了吗？`,
+  `   我第一步列出的任务，有没有哪个还没走完上面这几步？`,
+  ``,
+  `想让面板动，必须动**任务本身**（状态 / 说明 / 下一步）—— 面板读的是它。`,
+  `完整机制（含各种门禁和报错原因）见 D:\\codex-memory\\README.md 和各项目 AGENTS.md。`,
+].join('\n')
+
+const reqBtn = document.getElementById('reqBtn') as HTMLButtonElement | null
+if (reqBtn) {
+  /* ② 果冻压扁：pointerdown 时挂类，动画播完摘掉（摘掉才能再次触发） */
+  reqBtn.addEventListener('pointerdown', () => {
+    reqBtn.classList.remove('press')
+    void reqBtn.offsetWidth            /* 强制回流，保证连点也能重放 */
+    reqBtn.classList.add('press')
+    setTimeout(() => reqBtn.classList.remove('press'), 340)
+  })
+  reqBtn.addEventListener('click', async () => {
+    await copyText(LIBRARY_RECORD_REQUIREMENT, '怎么记录进共享库')
+    /* ⑤ 成功反馈：整块变绿 + 一笔画勾（图标只有 14px，不塞文字，和图钉同尺寸） */
+    if (reqBtn.classList.contains('done')) return
+    const old = reqBtn.innerHTML
+    reqBtn.classList.add('done')
+    reqBtn.innerHTML = '<svg class="tick" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    setBotState('burst', clock)        /* ④ 粒子绽放：球替你确认一下 */
+    setTimeout(() => { reqBtn.classList.remove('done'); reqBtn.innerHTML = old }, 1500)
+  })
 }
 
 /* ============ toast ============ */
@@ -1262,7 +1533,12 @@ function onLibraryChanged(d: any): void {
   loadProjects()
   if (open && view.kind === 'tasks') {
     const p = byKey(view.proj)
-    if (p) { p.tasks = []; loadTasks(view.proj) }
+    if (p) { p.tasks = []; p.fromDb = false; loadTasks(view.proj) }
+  } else {
+    /* 面板关着（或没在看任务）：这里拿不到"正在看哪个项目"，
+       所以统一标记为脏 —— 下次点进任何一个项目都会重新拉明细。
+       不这样的话，关着面板期间库里改了任务，点开看到的是内存里的旧数据。 */
+    libraryDirty = true
   }
   /* ① 事件流：把"刚刚发生了什么"说人话 */
   const key = String(d?.kind || '')
