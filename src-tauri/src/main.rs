@@ -176,6 +176,128 @@ fn pg_connect() -> Result<postgres::Client, String> {
     cfg.connect(postgres::NoTls).map_err(|e| format!("PG连接失败: {e}"))
 }
 
+/* ==================================================================
+   看门狗：数据库/服务掉了就自动拉回来
+   ==================================================================
+
+   为什么要有它（2026-09-15 用户报的现场）：
+     startup.log 里 **22:58 到 23:15 完全没有记录** —— 那 17 分钟里
+     PostgreSQL 和 memoryd 都掉了，而**没有任何东西去救**。
+     登录触发的那条自启任务早在登录时就跑完了，之后不再看第二眼；
+     面板自己的 `app.autolaunch()` 只负责"开机时把面板拉起来"，
+     也不管别的进程死活。
+     结果：面板一直显示"PG连接失败"，直到有人手动跑一遍启动脚本。
+
+   为什么放在面板里（而不是再写一个守护进程）：
+     · 面板**本来就是开机自启的**、而且**一直在桌面上跑** —— 天然的常驻观察点
+     · 它**已经知道**数据库通不通（每次 loadProjects 都在连）
+     · 用户看面板发现"连不上"的那一刻，正好就是最该触发自愈的时刻
+
+   行为（保守，宁可不修也不乱修）：
+     · 每 60 秒探一次数据库（真跑一条 SELECT 1，不是只看端口在听）
+     · **连续 3 次**失败才动手 —— 单次失败可能是瞬时抖动，
+       直接重启会把一个健康但忙的实例打断（这个脚本自己的注释里就警告过这件事）
+     · 动手时跑官方的 start-memoryd-silent.ps1（它自己会做端口检测 + HTTP 验证）
+     · 修完有 **5 分钟冷却**，避免"起不来就反复起"把机器拖死
+     · 全程写 debug.log，用户能在日志里看到它做过什么
+*/
+fn pg_ping() -> bool {
+    match pg_connect() {
+        Ok(mut c) => c.simple_query("SELECT 1").is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// 看门狗的参数。默认值保守（宁可晚一点修，也别把健康的实例打断）。
+///
+/// 支持用环境变量加速，**只为验证用** —— 否则要等 4 分钟才能在端到端里测到它：
+///   PANEL_WATCHDOG_CHECK_SECS  · PANEL_WATCHDOG_FAILS · PANEL_WATCHDOG_COOLDOWN_SECS
+/// 手工验证办法（我实际用它验过）：
+///   设 PANEL_WATCHDOG_CHECK_SECS=5 PANEL_WATCHDOG_FAILS=1 起面板 → 停掉 PostgreSQL
+///   → 看 debug.log 里 watchdog 有没有把它拉回来。
+fn wd_check_secs() -> u64 {
+    std::env::var("PANEL_WATCHDOG_CHECK_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60)
+}
+fn wd_fails_to_act() -> u32 {
+    std::env::var("PANEL_WATCHDOG_FAILS").ok().and_then(|v| v.parse().ok()).unwrap_or(3)
+}
+fn wd_cooldown_secs() -> u64 {
+    std::env::var("PANEL_WATCHDOG_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300)
+}
+
+fn spawn_watchdog() {
+    use std::process::Command;
+    use std::time::Duration;
+
+    let script = r"D:\codex-memory\repo\scripts\start-memoryd-silent.ps1";
+    std::thread::spawn(move || {
+        // 参数见 wd_* 函数（默认：每 60 秒探一次 · 连续 3 次失败才动手 · 修完冷却 5 分钟）
+        let check_every = wd_check_secs();
+        let fails_to_act = wd_fails_to_act();
+        let cooldown = Duration::from_secs(wd_cooldown_secs());
+
+        let mut fails = 0u32;
+        let mut last_repair: Option<std::time::Instant> = None;
+        rlog(&format!(
+            "watchdog: started (every {check_every}s, act after {fails_to_act} failures)"
+        ));
+
+        loop {
+            std::thread::sleep(Duration::from_secs(check_every));
+            if pg_ping() {
+                if fails > 0 {
+                    rlog(&format!("watchdog: database is back (was failing {fails}x)"));
+                }
+                fails = 0;
+                continue;
+            }
+
+            fails += 1;
+            rlog(&format!("watchdog: database unreachable ({fails}/{fails_to_act})"));
+
+            if fails < fails_to_act {
+                continue;
+            }
+            // 冷却期：刚修过就不重复修
+            if let Some(t) = last_repair {
+                if t.elapsed() < cooldown {
+                    rlog("watchdog: skipping repair (cooldown)");
+                    continue;
+                }
+            }
+            if !std::path::Path::new(script).exists() {
+                rlog(&format!("watchdog: cannot repair, script missing: {script}"));
+                continue;
+            }
+
+            rlog("watchdog: repairing — running start-memoryd-silent.ps1");
+            // 隐藏窗口跑（powershell 是控制台程序，直接起会闪黑框）
+            #[cfg(windows)]
+            let spawned = {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                Command::new("powershell")
+                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+            };
+            #[cfg(not(windows))]
+            let spawned = Command::new("pwsh")
+                .args(["-NoProfile", "-File", script])
+                .spawn();
+
+            match spawned {
+                Ok(_) => rlog("watchdog: repair launched (it verifies by HTTP itself)"),
+                Err(e) => rlog(&format!("watchdog: could not launch repair: {e}")),
+            }
+            last_repair = Some(std::time::Instant::now());
+            // 给它足够时间跑完（脚本自己的等待窗口是 120s/180s）
+            std::thread::sleep(Duration::from_secs(90));
+            fails = 0;
+        }
+    });
+}
+
 /// debug.log 的路径 —— **跟着 exe 走，不写死**。
 ///
 /// 为什么（2026-09-15 改，这是用户最初报的那个 bug 的根因）：
@@ -691,6 +813,10 @@ fn main() {
         ))
         .invoke_handler(tauri::generate_handler![qdata, qtasks, qcheckpoints, export_pdf, open_file, move_window, set_click_through, debug_log, call_shared_tool, events_url, start_event_stream])
         .setup(|app| {
+            /* 看门狗：数据库/服务掉了自动拉回来（见 spawn_watchdog 的说明）。
+               放在这里是因为 setup 时窗口已经起来了、面板已经常驻 ——
+               它就是这个机器上唯一"一直在看着"的东西。 */
+            spawn_watchdog();
             // ---- 强制不进任务栏 ----
             // 窗口创建流程会把 skipTaskbar 重置回去，所以启动后再补设几次
             if let Some(w) = app.get_webview_window("main") {
