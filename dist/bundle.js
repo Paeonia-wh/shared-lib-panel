@@ -4363,6 +4363,8 @@
       liveClaims: num(r.live_claims),
       staleClaims: num(r.stale_claims),
       liveSessions: num(r.live_sessions),
+      workingSessions: num(r.working_sessions),
+      lastBeatMin: typeof r.last_beat_min === "number" ? r.last_beat_min : -1,
       lastActivityMin: typeof r.last_activity_min === "number" ? r.last_activity_min : -1,
       lastWorkMin: typeof r.last_work_min === "number" ? r.last_work_min : -1,
       liveTasks: num(r.live_tasks),
@@ -4524,14 +4526,18 @@
   function projState(p) {
     if (p.total === 0) return { cls: "b-idle", label: "\u672A\u62C6\u89E3", icon: "i-tasks" };
     if (p.done === p.total) return { cls: "b-done", label: "\u5DF2\u5B8C\u6210", icon: "i-done" };
-    const working = num(p.liveTasks) > 0 || isLive(p) || liveDoingOf(p) > 0;
+    const BEAT_LIVE_MIN = 15;
+    const someoneHereNow = num(p.workingSessions) > 0 || num(p.liveTasks) > 0 || liveDoingOf(p) > 0 || num(p.liveClaims) > 0 || typeof p.lastBeatMin === "number" && p.lastBeatMin >= 0 && p.lastBeatMin <= BEAT_LIVE_MIN;
+    const progressedRecently = isLive(p);
+    const legacyFallback = p.workingSessions === void 0 && p.lastBeatMin === void 0 && num(p.liveSessions) > 0 && progressedRecently;
+    const working = (someoneHereNow || legacyFallback) && progressedRecently;
     if (working || reviewOf(p) > 0) {
       return { cls: "b-doing", label: "\u8FDB\u884C\u4E2D", icon: "i-doing" };
     }
     if (readyOf(p) > 0) return { cls: "b-ready", label: "\u5F85\u5F00\u59CB", icon: "i-ready" };
     return { cls: "b-idle", label: "\u7B49\u5F85\u4E2D", icon: "i-wait" };
   }
-  var ACTIVITY_LIVE_MIN = 60;
+  var ACTIVITY_LIVE_MIN = 90;
   var isLive = (p) => {
     if (typeof p.lastWorkMin === "number" && p.lastWorkMin >= 0) {
       return p.lastWorkMin <= ACTIVITY_LIVE_MIN;

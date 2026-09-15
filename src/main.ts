@@ -463,7 +463,9 @@ type Proj = {
   checkpoints?: number   /* 检查点数：库里唯一记录"过程"的量 —— 看一个任务里干了多少活 */
   liveClaims?: number    /* 心跳还新的认领数（后端 live_claims）—— 判断"在做"用这个 */
   staleClaims?: number   /* 有主但占用者早就不动了的数量 */
-  liveSessions?: number  /* 心跳还新的会话数 —— "有人在这个项目里干活"最直接的证据 */
+  liveSessions?: number  /* 心跳还新的会话数（2 小时窗口 —— 太宽，别单独拿它判"在做"） */
+  workingSessions?: number /* **正自称 working 的会话数**（2026-09-15 加）—— 判"现在有人在"最硬的信号 */
+  lastBeatMin?: number     /* 最新一次心跳距今多少分钟（-1 = 从没心跳过） */
   lastActivityMin?: number /* 活动信号（任务/检查点/产出）里最新的那个距今多少分钟 */
   lastWorkMin?: number     /* **真干活**的证据（检查点/产出）距今多少分钟 —— 判断"进行中"用这个 */
   liveTasks?: number       /* 活着的任务数（liveness 还在 = 有 worker 在） */
@@ -585,6 +587,8 @@ function applyProjects(list: any[]): void {
       liveClaims: num(r.live_claims),
       staleClaims: num(r.stale_claims),
       liveSessions: num(r.live_sessions),
+      workingSessions: num(r.working_sessions),
+      lastBeatMin: typeof r.last_beat_min === 'number' ? r.last_beat_min : -1,
       lastActivityMin: typeof r.last_activity_min === 'number' ? r.last_activity_min : -1,
       lastWorkMin: typeof r.last_work_min === 'number' ? r.last_work_min : -1,
       liveTasks: num(r.live_tasks),
@@ -823,20 +827,62 @@ export function projState(p: Proj): { cls: string; label: string; icon: string }
      为什么要有 ③：kstage 出现过"会话 62 分钟前刚登记、61 分钟前写了检查点，
      但所有任务还是 done/pending"——只看任务状态会误判成「待开始」。
      任务状态是**结果**，会话活动是**过程**；项目在不在推进，看过程更准。 */
-  /* ---- 双租约判据（2026-09-15 重写）----
-     原来这里只有"固定 60 分钟窗口"一条，于是用户遇到过：
-     「我在干一个 3 小时的大任务，第 61 分钟面板就显示待开始」——
-     窗口是**猜的**，会话自己声明的 ETA 才是**事实**。
-     出处（hermes-agent 的修复提交标题）：
-         fix(kanban): separate worker progress from liveness
-     四层，从上到下越来越弱：
-       ① 进度新            → 确定在干
-       ② 活着 + ETA 未到   → 它说了它在干，信它（这就是上面那个 bug 的解法）
-       ③ 活着 + 进度旧     → 仍算进行中，但**标注**"占着没推进"或"逾期"
-       ④ 活认领 / 待验收   → 兜底（老项目没有新字段，靠 COALESCE 走的旧语义）
-     ⚠ 第 ③ 层**不降级成"待开始"**：有人占着就是在进行，只是状态可疑 ——
-       降级会让"占着没推进"这种事从面板上消失，那正是最该被看见的。 */
-  const working = num(p.liveTasks) > 0 || isLive(p) || liveDoingOf(p) > 0
+  /* ---- 判「进行中」的最终口径（2026-09-15 第二次修，为用户报的 kstage 误报）----
+
+     用户报的现象：**kstage 显示「进行中」，点进去没有任何进行中的任务。**
+
+     查出来的实情：那个会话 22:23~22:25 确实在干（发了 4 个产出 + 2 个检查点），
+     **然后停了** —— status=idle、心跳停在 22:22、当前任务=None、working 会话 0 个。
+     但面板只看到「45 分钟前有产出」→ 一路显示「进行中」。
+
+     **根因：原来的判据只看「最近写过东西」，不看「现在还有没有人在」。**
+     45 分钟前的产出是**历史**，不是**当下**。
+
+     所以「进行中」现在要求**两个条件都成立**：
+       ① **有人在做**（正在这个项目上干活的证据）
+       ② **最近确实推进过**（进度新，或有人声明了还没到期的 ETA）
+
+     ①「有人在做」的几种形态（任一成立即可）：
+        · workingSessions > 0 —— 有会话正自称 working ★ 最硬，看的就是"现在"
+        · liveTasks > 0   —— 有任务的租约还没过期（平台管的那个租约）
+        · liveDoingOf > 0 —— 有任务被"活着的手"认领
+        · liveClaims > 0  —— 同上，后端口径（老项目没有前三个字段时靠它）
+        · liveSessions > 0 —— 有会话心跳还新（2 小时窗口；同样给老项目兜底）
+        · lastBeatMin 在 15 分钟内 —— 刚发过心跳（会话还在，只是可能没占任务）
+
+     ⚠ `lastBeatMin` 的窗口是 **15 分钟**，不是 90 —— 这是**测试抓出来的**：
+       第一版我给 90 分钟，结果 kstage 又显示成「进行中」了
+       （它的心跳停在 47 分钟前，落进 90 分钟窗口）。
+       心跳窗口要**短**才有意义：它回答的是"这个会话刚还在吗"，
+       15 分钟 ≈ 平台自己的租约时长（900 秒），两边口径一致。
+
+     ②「最近推进过」的窗口：`PROGRESS_LIVE_MIN = 90`（见 isLive）。
+        放宽到 90 是为了长任务（60 分钟太紧，用户遇到过大任务第 61 分钟被显示成「待开始」），
+        但放宽必须配上条件①，否则"刚停下的项目"会被一直算成在做 —— 那正是 kstage 那个 bug。
+
+     ⚠ 不把"占着但没推进"降级成「待开始」：有人占着就是在进行，只是可疑 ——
+       降级会让这种事从面板上消失，而那正是最该被看见的。
+       那种情况由 `stallNote()` 单独标注「占着没推进 / 逾期没交」。 */
+  /* 「现在有人吗」的窗口：15 分钟。
+     为什么是 15 而不是 90（测试抓出来的）：第一版给 90，结果 kstage 又显示成
+     「进行中」—— 它的心跳停在 47 分钟前，落进 90 分钟窗口里。
+     这个窗口回答的是"这个会话刚还在吗"，所以必须短；
+     15 分钟 ≈ 平台自己的租约时长（900 秒），两边口径一致。 */
+  const BEAT_LIVE_MIN = 15
+  /* ⚠ `liveSessions`（2 小时窗口）**不能单独**证明"现在有人" —— 实测踩到：
+     kstage 有会话在 54 分钟前发过心跳，落进 2 小时窗口，于是又误判成「进行中」。
+     它只能当**老项目的兜底**（那些项目没有 workingSessions / lastBeatMin 字段），
+     所以放在最后、且要求"最近真的推进过"（progressedRecently）才作数。 */
+  const someoneHereNow = num(p.workingSessions) > 0
+    || num(p.liveTasks) > 0
+    || liveDoingOf(p) > 0
+    || num(p.liveClaims) > 0
+    || (typeof p.lastBeatMin === 'number' && p.lastBeatMin >= 0 && p.lastBeatMin <= BEAT_LIVE_MIN)
+  const progressedRecently = isLive(p)
+  /* 老项目兜底：没有新字段时，才允许用 liveSessions（宽窗口）+ 最近推进过 来判 */
+  const legacyFallback = p.workingSessions === undefined && p.lastBeatMin === undefined
+    && num(p.liveSessions) > 0 && progressedRecently
+  const working = (someoneHereNow || legacyFallback) && progressedRecently
   if (working || reviewOf(p) > 0) {
     return { cls: 'b-doing', label: '进行中', icon: 'i-doing' }
   }
@@ -853,9 +899,16 @@ export function projState(p: Proj): { cls: string; label: string; icon: string }
  *      显示成"进行中"，用户立刻发现了。**我的清理动作制造了假信号。**
  *    · sessions.last_heartbeat —— 目前不是可靠信号：库里心跳类事件总数是 0，
  *      它只在登记会话时写一次，之后不再更新（要靠会话主动调 heartbeat）。
- *  阈值 1 小时：比 live_claims 的 2 小时更严 —— 徽章说"进行中"是很强的断言，
- *  宁可少说也别错说。 */
-const ACTIVITY_LIVE_MIN = 60
+ *  阈值：见 PROGRESS_LIVE_MIN（2026-09-15 从 60 放到 90）。
+ *  ⚠ 但**光靠这个判不出"进行中"** —— 它只看"最近写没写过东西"。
+ *  kstage 那个误报就是它的锅：45 分钟前有产出、会话早停了，却一路显示「进行中」。
+ *  所以 projState() 里它是**两个条件之一**，另一个是"现在有人"（workingSessions / lastBeatMin）。 */
+const ACTIVITY_LIVE_MIN = 90
+/* 「最近推进过」的窗口（分钟）。为什么是 90：
+   60 分钟对"干一个长任务"太紧 —— 用户遇到过大任务第 61 分钟就被显示成「待开始」；
+   但光放宽到 90 又会把"刚停下的项目"继续算成在做，
+   所以放宽的同时**必须**配上"现在有没有人在"那个条件（见 projState）。 */
+const PROGRESS_LIVE_MIN = 90
 const isLive = (p: Proj): boolean => {
   if (typeof p.lastWorkMin === 'number' && p.lastWorkMin >= 0) {
     return p.lastWorkMin <= ACTIVITY_LIVE_MIN

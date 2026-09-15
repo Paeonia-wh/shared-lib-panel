@@ -360,6 +360,24 @@ async fn qdata() -> Result<String, String> {
                    (SELECT count(*) FROM agent_sessions s5
                      WHERE s5.project_id = p.id AND s5.last_heartbeat IS NOT NULL
                        AND s5.last_heartbeat > now() - interval '2 hours')::int AS live_sessions,
+                   /* ---- 「现在真有人在这个项目上干活吗」（2026-09-15 加）----
+                      为什么需要：用户在 kstage 上发现的 bug ——
+                        那个会话 22:23~22:25 确实在干（发了 4 个产出 + 2 个检查点），**然后停了**
+                        （status=idle、心跳停在 22:22、当前任务=None）。
+                        但面板只看到「45 分钟前有产出」→ 一路显示「进行中」，
+                        点进去却没有任何进行中的任务。
+                      `live_sessions` 的 2 小时窗口对此太宽（2 小时前心跳过也算"在干"），
+                      所以另给两个**看当下**的信号：
+                        · working_sessions —— 正自称 working 的会话数（最硬）
+                        · last_beat_min    —— 最新一次心跳距今多少分钟
+                      前端据此判「进行中」：不能只凭「最近写过东西」，
+                      还得看**现在有没有人在**。 */
+                   (SELECT count(*) FROM agent_sessions s6
+                     WHERE s6.project_id = p.id AND s6.status = 'working')::int AS working_sessions,
+                   /* 最新一次心跳距今多少分钟（没有任何心跳时 -1） */
+                   COALESCE((SELECT floor(extract(epoch FROM (now() - max(s7.last_heartbeat))) / 60)::int
+                             FROM agent_sessions s7
+                             WHERE s7.project_id = p.id AND s7.last_heartbeat IS NOT NULL), -1) AS last_beat_min,
                    (SELECT count(*) FROM agent_sessions s WHERE s.project_id = p.id)::int AS sessions,
                    /* 检查点数：唯一记录"过程"的量 —— 一个任务里干了几轮、踩了哪些坑 */
                    (SELECT count(*) FROM agent_checkpoints ck WHERE ck.project_id = p.id)::int AS checkpoints,
@@ -398,6 +416,9 @@ async fn qdata() -> Result<String, String> {
                 "last_activity_min": r.get::<_, i32>("last_activity_min"),
                 "last_work_min": r.get::<_, i32>("last_work_min"),
                 "live_sessions": r.get::<_, i32>("live_sessions"),
+                /* 「现在有没有人在」的两个信号（2026-09-15 加，修 kstage 那个误报"进行中"） */
+                "working_sessions": r.get::<_, i32>("working_sessions"),
+                "last_beat_min": r.get::<_, i32>("last_beat_min"),
                 "live_claims": r.get::<_, i32>("live_claims"),
                 "live_tasks": r.get::<_, i32>("live_tasks"),
                 "stalled_tasks": r.get::<_, i32>("stalled_tasks"),
