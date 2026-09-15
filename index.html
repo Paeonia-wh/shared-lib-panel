@@ -36,15 +36,18 @@
   </div>
 </div>
 
-<!-- 悬浮球（bloub 引擎） -->
+<!-- 悬浮球（bloub 引擎）
+     窗口 = 球本身 = --ball（72px）。画布就这么大，装饰超出就被裁 —— 见 style.css
+     里「为什么没有留白」那段：orbit / play / notify / burst 四个动作的装饰
+     要 1.15~1.4 倍球半径，装不下，所以没放进随机播放。 -->
 <div class="ball" id="ball" role="button" tabindex="0" aria-label="共享项目库">
-  <svg id="bot" width="104" height="104" viewBox="-158 -158 316 316" role="img" aria-hidden="true"></svg>
+  <svg id="bot" viewBox="-158 -158 316 316" role="img" aria-hidden="true"></svg>
 </div>
 
 <!-- 面板 -->
 <section class="panel" id="panel" aria-hidden="true">
   <header class="p-head">
-    <div class="p-title">共享项目库</div>
+    <div class="p-title">共享项目库<span class="p-build" id="buildStamp"></span></div>
     <div class="p-actions">
       <button class="btn btn-pin" id="pinBtn" title="钉住面板"><svg class="ic"><use href="#i-pin"/></svg></button>
       <button class="btn btn-ghost" id="closeBtn" title="收起（Esc）"><svg class="ic"><use href="#i-x"/></svg></button>
@@ -55,17 +58,11 @@
 
   <div class="swatches" id="swatches"></div>
 
-  <div class="p-filters" id="filters">
-    <button class="chip is-on" data-filter="all">全部</button>
-    <button class="chip" data-filter="today">今日</button>
-    <button class="chip" data-filter="doing">进行中</button>
-    <button class="chip" data-filter="ready">待开始</button>
-    <button class="chip" data-filter="done">已完成</button>
-  </div>
-
   <div class="p-list" id="list"></div>
 </section>
 
+<!-- BUILD-STAMP: 构建时由 npm run front 自动写入，用来确认面板跑的是哪一版 -->
+<meta name="panel-build" content="dev">
 <script src="./bundle.js"></script>
 </body>
 </html>

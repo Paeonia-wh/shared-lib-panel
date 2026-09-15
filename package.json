@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "front": "esbuild src/main.ts --bundle --format=iife --target=es2020 --outfile=dist/bundle.js",
+    "front": "node build-front.mjs",
     "dev": "tauri dev",
     "build": "tauri build"
   },

@@ -46,7 +46,7 @@ export async function initTauri() {
 
 /** 空白处穿透：鼠标不在球/面板上时，点击直接落到下面的窗口 */
 function startHitTest() {
-  const ballEl = document.getElementById('ball')
+    const ballEl = document.getElementById('ball')
   const panelEl = document.getElementById('panel')
   setInterval(async () => {
     try {

@@ -10,39 +10,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 /// 直接调 Windows API 改扩展样式：Tauri 的 set_skip_taskbar 在本场景会被窗口创建流程覆盖
 
-/* ---------- 可配置项：别人 clone 下来改这里或设环境变量即可 ---------- */
 
-/// 共享项目库根目录
-fn memory_home() -> String {
-    std::env::var("CODEX_MEMORY_HOME").unwrap_or_else(|_| r"D:\codex-memory".to_string())
-}
-
-/// 平台 PostgreSQL 连接串
-fn pg_dsn() -> String {
-    std::env::var("CODEX_MEMORY_PANEL_DSN").unwrap_or_else(|_| {
-        "host=127.0.0.1 port=55440 user=codex_memory dbname=codex_memory".to_string()
-    })
-}
-
-/// memoryd 地址
-fn memoryd_url() -> String {
-    std::env::var("CODEX_MEMORY_PANEL_DAEMON")
-        .unwrap_or_else(|_| "http://127.0.0.1:47831".to_string())
-}
-
-/// 取 token 用的 Python（共享库的 venv）
-fn python_path() -> String {
-    std::env::var("CODEX_MEMORY_PANEL_PYTHON")
-        .unwrap_or_else(|_| format!(r"{}\runtime\venv\Scripts\python.exe", memory_home()))
-}
-
-/// 日志文件（默认系统临时目录）
-fn log_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("CODEX_MEMORY_PANEL_LOG")
-            .unwrap_or_else(|_| format!(r"{}\shared-lib-panel.log", std::env::temp_dir().display())),
-    )
-}
 
 #[cfg(windows)]
 mod winffi {
@@ -105,8 +73,7 @@ fn shared_token() -> Result<String, String> {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
 
-    let py = python_path();
-    let py = py.as_str();
+    let py = r"D:\codex-memory\runtime\venv\Scripts\python.exe";
     let code = "import sys; sys.path.insert(0, r'D:\\codex-memory\\repo\\src'); \
 from codex_memory.config import Settings; from codex_memory.security import protect; \
 print(protect((Settings.load().root / 'data/service-token.dpapi').read_bytes(), decrypt=True).decode())";
@@ -134,7 +101,7 @@ print(protect((Settings.load().root / 'data/service-token.dpapi').read_bytes(), 
 fn call_shared_tool(name: String, args: serde_json::Value) -> Result<String, String> {
         let token = shared_token()?;
         let body = serde_json::json!({ "name": name, "arguments": args });
-        let resp = ureq::post(&format!("{}/tool", memoryd_url()))
+        let resp = ureq::post("http://127.0.0.1:47831/tool")
             .set("Authorization", &format!("Bearer {token}"))
             .timeout(std::time::Duration::from_secs(120))
             .send_json(body)
@@ -156,7 +123,7 @@ async fn start_event_stream(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
 
     let token = shared_token()?;
-    let logpath = log_path();
+    let logpath = std::path::PathBuf::from(r"D:\codex\shared-lib-panel\debug.log");
     let say = move |m: String| {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&logpath) {
@@ -165,7 +132,7 @@ async fn start_event_stream(app: tauri::AppHandle) -> Result<(), String> {
     };
 
     std::thread::spawn(move || loop {
-        let url = format!("{}/events?token={token}", memoryd_url());
+        let url = format!("http://127.0.0.1:47831/events?token={token}");
         say("SSE(后台): 正在连接 memoryd...".to_string());
         match ureq::get(&url).timeout(std::time::Duration::from_secs(86400)).call() {
             Ok(resp) => {
@@ -200,7 +167,8 @@ async fn start_event_stream(app: tauri::AppHandle) -> Result<(), String> {
 /// 带超时的 PG 连接（默认连接串没超时，会永久挂住）
 fn pg_connect() -> Result<postgres::Client, String> {
     use std::time::Duration;
-    let mut cfg: postgres::Config = pg_dsn().parse().map_err(|e| format!("DSN 解析失败: {e}"))?;
+    let mut cfg = postgres::Config::new();
+    cfg.host("127.0.0.1").port(55440).user("codex_memory").dbname("codex_memory");
     cfg.connect_timeout(Duration::from_secs(5));
     cfg.connect(postgres::NoTls).map_err(|e| format!("PG连接失败: {e}"))
 }
@@ -209,7 +177,7 @@ fn pg_connect() -> Result<postgres::Client, String> {
 fn rlog(msg: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-        .open(log_path()) {
+        .open(r"D:\codex\shared-lib-panel\debug.log") {
         let _ = writeln!(f, "[rust] {msg}");
     }
 }
@@ -221,6 +189,7 @@ async fn qdata() -> Result<String, String> {
         let mut conn = pg_connect()?;
                 let sql = r#"
             SELECT p.project_key, p.name, p.kind, p.control_state, p.tags::text AS tags,
+                   COALESCE(p.scope, '') AS scope,
                    COALESCE(p.root_path, '') AS root_path,
                    to_char(p.updated_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD"T"HH24:MI:SS') AS updated_at,
                    count(t.id)::int AS total,
@@ -234,7 +203,7 @@ async fn qdata() -> Result<String, String> {
                    (SELECT count(*) FROM agent_sessions s WHERE s.project_id = p.id)::int AS sessions
             FROM agent_projects p
             LEFT JOIN agent_tasks t ON t.project_id = p.id
-            GROUP BY p.id, p.project_key, p.name, p.kind, p.control_state, p.tags, p.root_path, p.updated_at
+            GROUP BY p.id, p.project_key, p.name, p.kind, p.control_state, p.tags, p.scope, p.root_path, p.updated_at
             ORDER BY p.control_state, p.project_key
         "#;
         let rows = conn.query(sql, &[]).map_err(|e| { rlog(&format!("查询失败: {e}")); format!("查询失败: {e}") })?;
@@ -246,6 +215,7 @@ async fn qdata() -> Result<String, String> {
                 "kind": r.get::<_, String>("kind"),
                 "control_state": r.get::<_, String>("control_state"),
                 "tags": r.get::<_, String>("tags"),
+                "scope": r.get::<_, String>("scope"),
                 "root_path": r.get::<_, String>("root_path"),
                 "updated_at": r.get::<_, String>("updated_at"),
                 "total": r.get::<_, i32>("total"),
@@ -274,8 +244,15 @@ async fn qtasks(project_key: String) -> Result<String, String> {
         let sql = r#"
             SELECT t.task_key, t.title, t.status, t.priority,
                    COALESCE(t.owner_session_id, '') AS owner,
+                   COALESCE(t.description, '') AS description,
                    COALESCE(t.next_action, '') AS next_action,
                    (SELECT count(*) FROM agent_task_dependencies d WHERE d.task_id = t.id)::int AS deps,
+                   /* 未完成的前置数：只有它才代表"真的被卡住"。
+                      原来的 deps（总前置数）会让"前置全做完"的任务永远显示成等待中
+                      ——2026-09-15 对账时发现的。 */
+                   (SELECT count(*) FROM agent_task_dependencies d
+                      JOIN agent_tasks dp ON dp.id = d.depends_on_task_id
+                     WHERE d.task_id = t.id AND dp.status <> 'done')::int AS unmet_deps,
                    (SELECT string_agg(dp.task_key, ', ') FROM agent_task_dependencies d
                       JOIN agent_tasks dp ON dp.id = d.depends_on_task_id
                      WHERE d.task_id = t.id) AS dep_keys
@@ -292,8 +269,10 @@ async fn qtasks(project_key: String) -> Result<String, String> {
                 "status": r.get::<_, String>("status"),
                 "priority": r.get::<_, i32>("priority"),
                 "owner": r.get::<_, String>("owner"),
+                "description": r.get::<_, String>("description"),
                 "next_action": r.get::<_, String>("next_action"),
                 "deps": r.get::<_, i32>("deps"),
+                "unmet_deps": r.get::<_, i32>("unmet_deps"),
                 "dep_keys": r.get::<_, Option<String>>("dep_keys").unwrap_or_default(),
             })
         }).collect();
@@ -307,7 +286,7 @@ async fn qtasks(project_key: String) -> Result<String, String> {
 #[tauri::command]
 fn events_url() -> Result<String, String> {
     let token = shared_token()?;
-    Ok(format!("{}/events?token={token}", memoryd_url()))
+    Ok(format!("http://127.0.0.1:47831/events?token={token}"))
 }
 
 /// 调试日志（前端 -> 文件），正式版可删
@@ -342,7 +321,7 @@ fn main() {
         let msg = format!("PANIC: {info}");
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open(log_path()) {
+            .open(r"D:\codex\shared-lib-panel\debug.log") {
             let _ = writeln!(f, "[rust] {msg}");
         }
     }));

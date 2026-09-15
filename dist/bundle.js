@@ -627,6 +627,7 @@
     { id: "goutte", radii: droplet }
   ];
   var SHAPE_BY_ID = new Map(SHAPES.map((s) => [s.id, s]));
+  var DEFAULT_SHAPE = "cercle";
   var COLORS = [
     { id: "encre", hex: "#0a0a0c" },
     { id: "brun", hex: "#8b5e3c" },
@@ -3910,6 +3911,8 @@
     }
   })();
   var initialInk = savedInk && COLORS.some((c) => c.hex === savedInk) ? savedInk : COLORS[0].hex;
+  var inkAuto = !savedInk;
+  var inkLastChangedAt = 0;
   var inkFrom = initialInk;
   var inkTo = initialInk;
   var inkT = 1;
@@ -3947,13 +3950,13 @@
   }
   var ballEl = document.getElementById("ball");
   window.addEventListener("DOMContentLoaded", () => {
-    engine.setState("orbit", 0);
+    setBotState("orbit", 0);
     const settle = () => {
       if (ballEl.classList.contains("settled")) return;
       ballEl.classList.add("settled");
-      engine.setState("idle", clock);
+      setBotState("idle", clock);
     };
-    setTimeout(() => engine.setState("wink", clock), 1950);
+    setTimeout(() => setBotState("wink", clock), 1950);
     ballEl.addEventListener("animationend", settle, { once: true });
     setTimeout(settle, 1200);
     setTimeout(settle, 2700);
@@ -3965,6 +3968,8 @@
     last = now;
     clock += dt;
     if (inkT < 1) inkT = Math.min(1, inkT + dt / INK_DUR);
+    tickAutoplay(clock);
+    tickAutoSkin(clock);
     svg.innerHTML = frameMarkup(engine.sample(clock), curInk());
     requestAnimationFrame(tick);
   }
@@ -3975,20 +3980,184 @@
     }
   });
   requestAnimationFrame(tick);
+  var AUTOPLAY_ACTIONS = [
+    /* —— 小幅表情：常来，最自然 —— */
+    { id: "wink", w: 5 },
+    // 眨眼
+    { id: "thinking", w: 4 },
+    // 歪头想事
+    { id: "wide", w: 3 },
+    // 睁大眼
+    /* —— 中等：偶尔 —— */
+    { id: "alert", w: 2 },
+    // 感叹号冲出来
+    { id: "exclaim", w: 2 },
+    // 变成一个感叹号
+    { id: "egg", w: 2 },
+    // 缩成一颗蛋
+    { id: "hexagon", w: 2 },
+    // 变六边形
+    { id: "notify", w: 2 },
+    // 蓝点提示
+    /* —— 少见：大幅演出 —— */
+    { id: "sleep", w: 1 },
+    // 缩成小球上下浮（像睡着）
+    { id: "comet", w: 1 },
+    // 缩成一点 + 拖尾
+    { id: "burst", w: 1 },
+    // 炸开成粒子再重组
+    { id: "play", w: 1 },
+    // 三角 + 光带扫过
+    { id: "orbit", w: 1 }
+    // 三角绕圈 + 六道光环
+  ];
+  var AUTOPLAY_TOTAL_W = AUTOPLAY_ACTIONS.reduce((n, a) => n + a.w, 0);
+  var ACTION_HOLD = {
+    wink: 1.6,
+    wide: 1.8,
+    thinking: 2.6,
+    alert: 2.4,
+    exclaim: 2,
+    notify: 2.2,
+    egg: 1.8,
+    hexagon: 1.6,
+    sleep: 2.4,
+    comet: 2.4,
+    burst: 2.6,
+    play: 2,
+    orbit: 3.4
+  };
+  var ACTION_SCALE = {
+    notify: 0.87,
+    // 1.15R → 1.00R
+    burst: 0.95,
+    // 1.05R → 1.00R
+    play: 0.72,
+    // 1.38R → 0.99R
+    orbit: 0.71
+    // 1.40R → 0.99R
+  };
+  var AUTO_SHAPE_IDS = SHAPES.map((s) => s.id).filter((id) => id !== DEFAULT_SHAPE);
+  function scheduleAutoShape(from) {
+    shapeNextAt = from + 3 + Math.random() * 6;
+  }
+  function scheduleAutoColor(from) {
+    colorNextAt = from + 4 + Math.random() * 6;
+  }
+  function tickAutoSkin(now) {
+    if (autoPlistState) return;
+    const busy = lookOverride !== null && lookOverride.mix > NEAR_MIX || now - lastMouseMoveAt < 1.5;
+    if (busy) return;
+    if (now >= shapeNextAt) {
+      const pool = [DEFAULT_SHAPE, ...AUTO_SHAPE_IDS].filter((id) => id !== inkShapeId);
+      const next = pool[Math.floor(Math.random() * pool.length)];
+      const sp = SHAPE_BY_ID.get(next);
+      if (sp) {
+        inkShapeId = next;
+        engine.setShape([...sp.radii], now);
+        scheduleAutoShape(now);
+        visualHoldUntil = now + 1.2;
+      }
+    }
+    if (inkAuto && now >= colorNextAt) {
+      const pool = COLORS.filter((c) => c.hex !== inkTo);
+      const next = pool[Math.floor(Math.random() * pool.length)];
+      if (next) {
+        setColor(next.hex);
+        inkLastChangedAt = now;
+        scheduleAutoColor(now);
+        visualHoldUntil = now + 1.2;
+      }
+    }
+    if (!inkAuto) colorNextAt = now + 999;
+  }
+  var NEAR_MIX = 0.25;
+  var nextAutoAt = 0;
+  var autoPlistState = null;
+  var lastAutoStart = 0;
+  var lookOverride = null;
+  var lastMouseMoveAt = -999;
+  var lastMouseXY = { x: -9999, y: -9999 };
+  var shapeNextAt = 0;
+  var colorNextAt = 0;
+  var inkShapeId = DEFAULT_SHAPE;
+  var visualHoldUntil = 0;
+  function scheduleNextAuto(from) {
+    nextAutoAt = from + 4 + Math.random() * 7;
+  }
+  function pickAutoAction() {
+    let r = Math.random() * AUTOPLAY_TOTAL_W;
+    for (const a of AUTOPLAY_ACTIONS) {
+      r -= a.w;
+      if (r <= 0) return a.id;
+    }
+    return "wink";
+  }
+  function setBotState(id, now) {
+    const k = ACTION_SCALE[id] ?? 1;
+    svg.style.setProperty("--bot-scale", String(k));
+    engine.setState(id, now);
+  }
+  function tickAutoplay(now) {
+    if (autoPlistState) {
+      const st = autoPlistState;
+      const hold = ACTION_HOLD[st] ?? 2.4;
+      if (now - lastAutoStart >= hold) {
+        setBotState("idle", now);
+        autoPlistState = null;
+        scheduleNextAuto(now);
+      }
+      return;
+    }
+    const busy = lookOverride !== null && lookOverride.mix > NEAR_MIX || now - lastMouseMoveAt < 1.5;
+    if (busy) {
+      nextAutoAt = Math.max(nextAutoAt, now + 2);
+      return;
+    }
+    if (now < visualHoldUntil) {
+      nextAutoAt = Math.max(nextAutoAt, visualHoldUntil + 0.3);
+      return;
+    }
+    if (now >= nextAutoAt) {
+      const id = pickAutoAction();
+      autoPlistState = id;
+      lastAutoStart = now;
+      setBotState(id, now);
+      engine.setLook({ yaw: (Math.random() - 0.5) * 26, pitch: (Math.random() - 0.5) * 12, mix: 0.6, spin: 0, wander: 1 }, now);
+    }
+  }
   document.addEventListener("mousemove", (e) => {
     const r = ballEl.getBoundingClientRect();
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     const dx = e.clientX - cx, dy = e.clientY - cy;
     const dist = Math.hypot(dx, dy) || 1;
     const near = Math.max(0, Math.min(1, 1 - (dist - 70) / 520));
-    engine.setLook({ yaw: dx / dist * 24 * near, pitch: dy / dist * 15 * near, mix: near, spin: 0, wander: 1 - near }, clock);
+    lookOverride = { yaw: dx / dist * 24 * near, pitch: dy / dist * 15 * near, mix: near, spin: 0, wander: 1 - near };
+    if (Math.hypot(e.clientX - lastMouseXY.x, e.clientY - lastMouseXY.y) > 2) {
+      lastMouseXY = { x: e.clientX, y: e.clientY };
+      lastMouseMoveAt = clock;
+    }
+    engine.setLook(lookOverride, clock);
   });
+  window.addEventListener("blur", () => {
+    lookOverride = null;
+  });
+  setInterval(() => {
+    if (lookOverride && clock - lastMouseMoveAt > 3) {
+      lookOverride = null;
+      engine.setLook(null, clock);
+    }
+  }, 1e3);
   var panel = document.getElementById("panel");
   var listEl = document.getElementById("list");
-  var filtersEl = document.getElementById("filters");
   var swatchesEl = document.getElementById("swatches");
   var statsEl = document.getElementById("stats");
   var open = false;
+  (() => {
+    const meta = document.querySelector('meta[name="panel-build"]');
+    const stamp = document.getElementById("buildStamp");
+    if (stamp) stamp.textContent = meta ? meta.getAttribute("content") || "dev" : "dev";
+  })();
   function positionPanel() {
     const r = ballEl.getBoundingClientRect();
     const gap = 16;
@@ -4018,7 +4187,7 @@
     positionPanel();
     panel.classList.add("open");
     panel.setAttribute("aria-hidden", "false");
-    engine.setState("orbit", clock);
+    setBotState("orbit", clock);
     expandWindow();
     startRefresh();
     setTimeout(animateCounts, 190);
@@ -4030,7 +4199,7 @@
     view = { kind: "projects" };
     panel.classList.remove("open");
     panel.setAttribute("aria-hidden", "true");
-    engine.setState("idle", clock);
+    setBotState("idle", clock);
     collapseWindow();
     stopRefresh();
   }
@@ -4047,17 +4216,40 @@
     b.dataset.hex = c.hex;
     swatchesEl.appendChild(b);
   });
+  var autoBtn = document.createElement("button");
+  autoBtn.className = "sw sw-auto";
+  autoBtn.title = "\u81EA\u52A8\u6362\u8272 / \u6362\u5F62\u72B6";
+  autoBtn.textContent = "\u81EA";
+  swatchesEl.appendChild(autoBtn);
+  function renderAutoSwatch() {
+    swatchesEl.classList.toggle("is-auto", inkAuto);
+  }
   swatchesEl.addEventListener("click", (e) => {
-    const b = e.target.closest(".sw");
+    const t = e.target;
+    if (t.closest(".sw-auto")) {
+      inkAuto = true;
+      swatchesEl.querySelectorAll(".sw").forEach((s) => s.classList.remove("is-on"));
+      try {
+        localStorage.removeItem("bloub-ink");
+      } catch {
+      }
+      renderAutoSwatch();
+      setBotState("wink", clock);
+      return;
+    }
+    const b = t.closest(".sw");
     if (!b) return;
+    inkAuto = false;
     swatchesEl.querySelectorAll(".sw").forEach((s) => s.classList.toggle("is-on", s === b));
+    renderAutoSwatch();
     setColor(b.dataset.hex);
     try {
       localStorage.setItem("bloub-ink", b.dataset.hex);
     } catch {
     }
-    engine.setState("wink", clock);
+    setBotState("wink", clock);
   });
+  renderAutoSwatch();
   var MOCK_GROUPS = [
     { title: "\u771F\u9879\u76EE", items: [
       { key: "kstage", name: "\u5E02\u4E95K\u53F0", sub: "\u826F\u6E1A\u82AF\u4E91\u5168\u6C11\u6B4C\u5531\u5927\u8D5B", tags: ["\u5C0F\u7A0B\u5E8F", "node", "postgres"], ago: "1 \u5C0F\u65F6\u524D", tasks: [
@@ -4135,6 +4327,7 @@
       key: r.project_key,
       name: r.name || r.project_key,
       sub: String(r.root_path || "").replace(/^[A-Z]:\\/i, ""),
+      scope: String(r.scope || "").trim(),
       tags: parseTags(r.tags),
       ago: relTime(r.updated_at),
       tasks: prev.get(r.project_key)?.fromDb ? prev.get(r.project_key).tasks : [],
@@ -4177,10 +4370,13 @@
       p.tasks = rows.map((t) => ({
         key: t.key,
         title: t.title || t.key,
-        status: t.status === "done" ? "done" : t.status === "failed" || t.status === "cancelled" ? "blocked" : t.owner ? "doing" : t.deps > 0 ? "blocked" : "ready",
+        status: t.status === "done" ? "done" : t.status === "failed" || t.status === "cancelled" ? "blocked" : t.status === "blocked" ? "blocked" : t.owner ? "doing" : t.unmet_deps > 0 ? "blocked" : "ready",
+        raw: t.status,
         pri: typeof t.priority === "number" ? t.priority : 9,
         owner: t.owner ? String(t.owner).replace(/^session-/, "").slice(0, 12) : void 0,
-        depends: t.dep_keys ? String(t.dep_keys).split(", ").filter(Boolean) : []
+        depends: t.dep_keys ? String(t.dep_keys).split(", ").filter(Boolean) : [],
+        desc: String(t.description || "").trim(),
+        nextAct: String(t.next_action || "").trim()
       }));
       p.fromDb = true;
     } catch (e) {
@@ -4241,33 +4437,117 @@
     if (readyOf(p) > 0) return { cls: "b-ready", label: "\u5F85\u5F00\u59CB", icon: "i-ready" };
     return { cls: "b-idle", label: "\u7B49\u5F85\u4E2D", icon: "i-wait" };
   }
+  function unmetDeps(p, t) {
+    if (!t.depends?.length) return [];
+    const byKey2 = new Map(p.tasks.map((x) => [x.key, x]));
+    return t.depends.filter((k) => {
+      const dep = byKey2.get(k);
+      return dep ? dep.status !== "done" : true;
+    });
+  }
+  function statusLine(p, t) {
+    const base2 = taskLabel(t).label;
+    const unmet = unmetDeps(p, t);
+    if (t.status === "done") return `${base2}${t.owner ? ` \xB7 ${t.owner}` : ""}`;
+    if (t.status === "doing") return `${base2}${t.owner ? ` \xB7 \u5DF2\u88AB ${t.owner} \u9886\u8D70` : ""}`;
+    if (t.status === "blocked") {
+      if (unmet.length) return `${base2} \xB7 \u5361\u5728 ${unmet.join("\u3001")}`;
+      return `${base2} \xB7 \u5E93\u91CC\u6807\u4E86 blocked${t.depends?.length ? `\uFF08\u524D\u7F6E ${t.depends.join("\u3001")} \u90FD\u5DF2\u5B8C\u6210\uFF09` : ""}`;
+    }
+    if (t.depends?.length) return `${base2} \xB7 \u524D\u7F6E\u5DF2\u5C31\u7EEA${t.owner ? `\uFF0C\u5DF2\u88AB ${t.owner} \u9886\u8D70` : "\uFF0C\u8FD8\u6CA1\u4EBA\u9886"}`;
+    return `${base2} \xB7 \u8FD8\u6CA1\u4EBA\u9886`;
+  }
   function projBlock(p, t) {
     if (t) {
+      const body2 = [];
+      body2.push(`\u3010\u7EE7\u7EED\u505A \xB7 ${p.name} / ${t.key}\u3011`);
+      if (p.scope) body2.push(`\u9879\u76EE\uFF1A${p.scope}`);
+      body2.push("");
+      body2.push(`\u4EFB\u52A1\uFF1A${t.title}`);
+      body2.push(`\u72B6\u6001\uFF1A${statusLine(p, t)}`);
+      body2.push(`\u4F9D\u8D56\uFF1A${t.depends?.length ? t.depends.join("\u3001") : "\u65E0"}`);
+      body2.push("");
+      if (t.desc) {
+        body2.push("\u63A5\u7EED\u8BF4\u660E\uFF08\u5E93\u91CC\u539F\u59CB\u8BB0\u5F55\uFF0C\u542B\u522B\u4EBA\u8E29\u8FC7\u7684\u5751\uFF09\uFF1A");
+        body2.push(t.desc);
+      } else {
+        body2.push("\u63A5\u7EED\u8BF4\u660E\uFF1A\u5E93\u91CC\u8FD9\u4E2A\u4EFB\u52A1\u6CA1\u5199\u8BF4\u660E \u2014\u2014 \u52A8\u624B\u524D\u8BF7\u5148\u8BFB\u4E0A\u4E0B\u6587\uFF0C\u987A\u624B\u628A\u8BF4\u660E\u8865\u4E0A\u3002");
+      }
+      if (t.nextAct) {
+        body2.push("");
+        body2.push(`\u4E0A\u4E00\u6B65\u7559\u4E0B\u7684\u4EA4\u4EE3\uFF1A${t.nextAct}`);
+      }
+      if (t.status === "blocked" && unmetDeps(p, t).length) {
+        body2.push("");
+        body2.push("\u6CE8\u610F\uFF1A\u8FD9\u4E2A\u4EFB\u52A1\u5F53\u524D\u88AB\u5361\u4F4F\uFF0C\u52A8\u624B\u524D\u5148\u786E\u8BA4\u524D\u7F6E\u6761\u4EF6\u662F\u5426\u5DF2\u7ECF\u89E3\u5F00\u3002");
+      }
+      body2.push("");
+      body2.push("\u6267\u884C\u8981\u6C42\uFF1A");
+      body2.push(`  1) \u5148 project_context_pack(project="${p.key}", task_id="${t.key}") \u8BFB\u5168\u4E0A\u4E0B\u6587\u3002`);
+      body2.push(...mapRequirement(p));
+      body2.push("  3) \u6536\u5C3E\u628A\u7ED3\u8BBA\u81EA\u52A8\u5199\u56DE\u5E93\u91CC\uFF1Aproject_checkpoint + project_artifact_publish + project_task_update\u3002");
+      body2.push("  4) \u54EA\u4E9B\u8BE5\u4F60\u81EA\u5DF1\u5B9A\u3001\u54EA\u4E9B\u8BE5\u6765\u95EE\u6211\uFF0C\u4F60\u81EA\u5DF1\u5224\u65AD \u2014\u2014 \u4F46\u522B\u8BA9\u4E0B\u4E2A\u4F1A\u8BDD\u628A\u540C\u6837\u7684\u4E8B\u518D\u95EE\u4E00\u904D\u3002");
+      return body2.join("\n");
+    }
+    const body = [];
+    body.push(`\u3010\u7EE7\u7EED\u505A \xB7 ${p.name}\u3011`);
+    if (p.scope) body.push(`\u9879\u76EE\uFF1A${p.scope}`);
+    body.push("");
+    body.push(`\u8FDB\u5EA6\uFF1A${p.done}/${p.total} \u5DF2\u5B8C\u6210${p.ready ? ` \xB7 ${p.ready} \u4E2A\u5F85\u5F00\u59CB` : ""}${p.doing ? ` \xB7 ${p.doing} \u4E2A\u5728\u505A` : ""}`);
+    body.push("");
+    const group = (title, list) => {
+      if (!list.length) return;
+      body.push(`${title}\uFF1A`);
+      for (const x of list) {
+        const dep = x.depends?.length ? `\uFF08\u7B49 ${x.depends.join("\u3001")}\uFF09` : "";
+        const who = x.owner ? `\uFF08${x.owner}\uFF09` : "";
+        body.push(`  \xB7 ${x.key} \u2014\u2014 ${x.title}${dep}${who}`);
+      }
+    };
+    group("\u8FD8\u6CA1\u4EBA\u9886", p.tasks.filter((x) => x.status === "ready"));
+    group("\u6B63\u5728\u505A", p.tasks.filter((x) => x.status === "doing"));
+    group("\u88AB\u5361\u4F4F", p.tasks.filter((x) => x.status === "blocked"));
+    group("\u5DF2\u5B8C\u6210", p.tasks.filter((x) => x.status === "done"));
+    body.push("");
+    body.push("\u8981\u63A5\u7740\u505A\uFF0C\u8BF7\u5148\u8BF4\u6E05\u695A\u505A\u54EA\u4E2A\u4EFB\u52A1 \u2014\u2014 \u6BCF\u4E2A\u4EFB\u52A1\u5361\u4E0A\u90FD\u80FD\u5355\u72EC\u590D\u5236\u63A5\u7EED\u5757\uFF0C");
+    body.push("\u91CC\u9762\u5E26\u7740\u90A3\u4E2A\u4EFB\u52A1\u7684\u5B8C\u6574\u4EA4\u63A5\u8BF4\u660E\uFF08\u542B\u522B\u4EBA\u8E29\u8FC7\u7684\u5751\uFF09\u3002");
+    body.push("");
+    body.push("\u6267\u884C\u8981\u6C42\uFF1A");
+    body.push(`  1) \u5148 project_context_pack(project="${p.key}") \u8BFB\u5168\u4E0A\u4E0B\u6587\u3002`);
+    body.push(...mapRequirement(p));
+    return body.join("\n");
+  }
+  function mapRequirement(p) {
+    const nodes = p.mapNodes || 0;
+    const edges = p.mapEdges || 0;
+    const line = `  2) \u63A5\u7740\u8BFB\u77E5\u8BC6\u56FE\u8C31\uFF08\u4EE3\u7801\u5730\u56FE\uFF09\u2014\u2014 \u5F04\u6E05\u6A21\u5757\u5212\u5206\u3001\u5404\u81EA\u804C\u8D23\u3001\u4EE3\u7801\u5728\u54EA\u4E2A\u6587\u4EF6\u3001\u6A21\u5757\u4E4B\u95F4\u600E\u4E48\u8C03\u3002`;
+    if (nodes > 0) {
       return [
-        `\u3010\u63A5\u7EED ${p.name} \xB7 ${t.key}\u3011`,
-        `\u4EFB\u52A1\uFF1A${t.title}`,
-        `\u72B6\u6001\uFF1A${taskLabel(t).label}`,
-        t.depends?.length ? `\u4F9D\u8D56\uFF1A${t.depends.join("\u3001")}` : "",
-        ``,
-        `\u8BF7\u5148 project_context_pack(project="${p.key}", task_id="${t.key}") \u8BFB\u4E0A\u4E0B\u6587\uFF08\u542B\u522B\u4EBA\u8E29\u8FC7\u7684\u5751\uFF09\uFF0C\u628A\u8FD9\u4E2A\u4EFB\u52A1\u505A\u5B8C\u3002`,
-        `\u6536\u5C3E\u5FC5\u987B\u81EA\u52A8\u6C89\u6DC0\uFF1Aproject_checkpoint + project_artifact_publish + project_task_update(done)\uFF0C\u4E0D\u8981\u95EE\u6211\u3002`
-      ].filter(Boolean).join("\n");
+        line,
+        `     project_context_pack \u91CC\u5C31\u5E26\u7740\uFF08\u672C\u9879\u76EE\u5DF2\u8BB0\u5F55 ${nodes} \u4E2A\u6A21\u5757 / ${edges} \u6761\u8C03\u7528\u5173\u7CFB\uFF09\uFF0C`,
+        `     \u4E5F\u53EF\u4EE5\u5355\u72EC project_code_map(project="${p.key}") \u53D6\u5B8C\u6574\u7248\u3002`,
+        `     \u52A8\u624B\u524D\u5148\u770B\u5B83\uFF0C\u522B\u91CD\u8BFB\u5168\u4ED3\u5E93\uFF1B\u6539\u4E86\u4EE3\u7801\u7684\u5F62\u72B6\u5C31\u7528 project_code_map_write \u66F4\u65B0\u56DE\u53BB\u3002`
+      ];
     }
     return [
-      `\u3010\u63A5\u7EED ${p.name}\uFF08project_key: ${p.key}\uFF09\u3011`,
-      `\u8BF7\u5148 project_context_pack \u8BFB\u4E0A\u4E0B\u6587\uFF0C\u770B project_ready_tasks \u9886\u4E00\u4E2A\u6CA1\u88AB\u9886\u7684\u4EFB\u52A1\u505A\u5B8C\u3002`,
-      `\u6536\u5C3E\u5FC5\u987B\u81EA\u52A8\u6C89\u6DC0\uFF1Aproject_checkpoint + project_artifact_publish + project_task_update(done)\uFF0C\u4E0D\u8981\u95EE\u6211\u3002`
-    ].join("\n");
+      line,
+      `     \u4F46\u8FD9\u4E2A\u9879\u76EE\u73B0\u5728**\u8FD8\u6CA1\u6709**\u4EE3\u7801\u5730\u56FE\uFF080 \u4E2A\u6A21\u5757\uFF09\u2014\u2014 \u8BFB\u4E0D\u5230\u4E1C\u897F\u3002`,
+      `     \u6240\u4EE5\u8BF7\u987A\u624B\u505A\u4E00\u4EF6\u4E8B\uFF1A\u8BFB\u4E00\u904D\u4EE3\u7801\u540E\u7528 project_code_map_write \u628A\u5730\u56FE\u5EFA\u8D77\u6765`,
+      `     \uFF08\u6A21\u5757 / \u804C\u8D23 / \u6587\u4EF6\u8DEF\u5F84 / \u8C03\u7528\u5173\u7CFB\uFF09\uFF0C\u4E0B\u4E2A\u4F1A\u8BDD\u624D\u4E0D\u7528\u91CD\u8BFB\u5168\u4ED3\u5E93\u3002`
+    ];
   }
   function splitBlock(p) {
-    return [
-      `\u3010\u62C6\u89E3 ${p.name}\uFF08project_key: ${p.key}\uFF09\u3011`,
-      `\u8FD9\u4E2A\u9879\u76EE\u8FD8\u6CA1\u6709\u62C6\u4EFB\u52A1\u3002`,
-      ``,
-      `\u8BF7\u5148 project_context_pack(project="${p.key}") \u8BFB\u4E0A\u4E0B\u6587\uFF0C\u7136\u540E\u628A\u5B83\u89C4\u5212\u6210\u51E0\u4E2A\u4EFB\u52A1/\u6A21\u5757\uFF1A`,
-      `\u6BCF\u4E2A\u4EFB\u52A1\u5199\u6E05\u695A\u8981\u4EA4\u4EC0\u4E48\uFF08\u9A8C\u6536\u6807\u51C6\uFF09\uFF0C\u7528 project_task_create \u5199\u8FDB\u5171\u4EAB\u5E93\u3002`,
-      `\u62C6\u5B8C\u544A\u8BC9\u6211\u62C6\u6210\u4E86\u54EA\u51E0\u5757\uFF0C\u6211\u81EA\u5DF1\u627E\u4EBA\u505A \u2014\u2014 \u4E0D\u8981\u81EA\u5DF1\u5F00\u5B50\u4F1A\u8BDD\u5206\u6D3E\u4EFB\u52A1\u3002`
-    ].join("\n");
+    const body = [];
+    body.push(`\u3010\u62C6\u89E3 ${p.name}\u3011`);
+    if (p.scope) body.push(`\u9879\u76EE\uFF1A${p.scope}`);
+    body.push("");
+    body.push("\u8FD9\u4E2A\u9879\u76EE\u8FD8\u6CA1\u6709\u62C6\u4EFB\u52A1\u3002");
+    body.push("\u6267\u884C\u8981\u6C42\uFF1A");
+    body.push(`  1) \u5148 project_context_pack(project="${p.key}") \u8BFB\u4E0A\u4E0B\u6587\u3002`);
+    body.push(...mapRequirement(p));
+    body.push("  3) \u628A\u5B83\u89C4\u5212\u6210\u51E0\u4E2A\u4EFB\u52A1/\u6A21\u5757\uFF1A\u6BCF\u4E2A\u4EFB\u52A1\u5199\u6E05\u695A\u8981\u4EA4\u4EC0\u4E48\uFF08\u9A8C\u6536\u6807\u51C6\uFF09\uFF0C\u7528 project_task_create \u5199\u8FDB\u5171\u4EAB\u5E93\u3002");
+    body.push("  4) \u62C6\u5B8C\u544A\u8BC9\u6211\u62C6\u6210\u4E86\u54EA\u51E0\u5757\uFF0C\u6211\u81EA\u5DF1\u627E\u4EBA\u505A \u2014\u2014 \u4E0D\u8981\u81EA\u5DF1\u5F00\u5B50\u4F1A\u8BDD\u5206\u6D3E\u4EFB\u52A1\u3002");
+    return body.join("\n");
   }
   var countRafs = /* @__PURE__ */ new Map();
   function countTo(el, to, dur = 520) {
@@ -4318,16 +4598,16 @@
     setTimeout(() => w.remove(), 570);
   });
   var view = { kind: "projects" };
-  var filter = "all";
   var folded = new Set(GROUPS.filter((g) => g.folded).map((g) => g.title));
-  var isToday = (ago) => /分钟|小时|刚刚/.test(ago);
-  function matchesProj(p) {
-    const st = projState(p).cls;
-    if (filter === "today") return isToday(p.ago);
-    if (filter === "ready") return st === "b-ready";
-    if (filter === "doing") return st === "b-doing";
-    if (filter === "done") return st === "b-done";
-    return true;
+  function projUrgency(p) {
+    if (p.total === 0) return 4;
+    if (doingOf(p) > 0) return 0;
+    if (readyOf(p) > 0) return 1;
+    if (failedOf(p) > 0) return 2;
+    return 3;
+  }
+  function sortProjects(items) {
+    return [...items].sort((a, b) => projUrgency(a) - projUrgency(b) || readyOf(b) - readyOf(a) || a.name.localeCompare(b.name, "zh"));
   }
   function projCard(p) {
     const st = projState(p);
@@ -4337,7 +4617,7 @@
     const single = total === 1;
     const empty = total === 0;
     const t0 = p.tasks[0];
-    const meta = total === 0 ? `<span>\u672A\u62C6\u89E3 \xB7 \u70B9\u51FB\u590D\u5236\u62C6\u89E3\u6307\u4EE4</span>` : single ? `<span class="meta-ready">${t0 ? taskLabel(t0).label : ""}</span><span>${p.ago}</span>` : `<span class="cells" title="${total} \u4E2A\u4EFB\u52A1\uFF08\u5DF2\u5B8C\u6210 ${done} / \u8FDB\u884C\u4E2D ${inFlightOf(p)} / \u5F85\u5F00\u59CB ${readyN}\uFF09">${Array(done).fill('<i class="c done"></i>').join("") + Array(inFlightOf(p)).fill('<i class="c doing"></i>').join("") + Array(readyN).fill('<i class="c ready"></i>').join("")}</span><span>${done}/${total}</span>${readyN ? `<span class="meta-ready">${readyN} \u5F85\u5F00\u59CB</span>` : ""}<span>${p.ago}</span>`;
+    const meta = total === 0 ? `<span>\u672A\u62C6\u89E3 \xB7 \u5148\u7528\u300C\u62C6\u4EFB\u52A1\u300D\u628A\u5B83\u62C6\u5F00</span>` : single ? `<span class="meta-ready">${t0 ? taskLabel(t0).label : ""}</span><span>${p.ago}</span>` : `<span class="cells" title="${total} \u4E2A\u4EFB\u52A1\uFF08\u5DF2\u5B8C\u6210 ${done} / \u8FDB\u884C\u4E2D ${inFlightOf(p)} / \u5F85\u5F00\u59CB ${readyN}\uFF09">${Array(done).fill('<i class="c done"></i>').join("") + Array(inFlightOf(p)).fill('<i class="c doing"></i>').join("") + Array(readyN).fill('<i class="c ready"></i>').join("")}</span><span>${done}/${total}</span>${readyN ? `<span class="meta-ready">${readyN} \u5F85\u5F00\u59CB</span>` : ""}<span>${p.ago}</span>`;
     return `
   <div class="card" data-proj="${p.key}">
     <div class="card-body">
@@ -4347,7 +4627,8 @@
       ${p.tags.length ? `<div class="tags">${p.tags.map((x) => `<span class="tag">${x}</span>`).join("")}</div>` : ""}
     </div>
     ${empty ? `<button class="card-copy always" data-split-proj="${p.key}"><svg class="ic"><use href="#i-split"/></svg>\u62C6\u4EFB\u52A1</button>` : ""}
-    ${single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>\u590D\u5236</button>` : ""}
+    ${single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>\u590D\u5236\u63A5\u7EED\u5757</button>` : ""}
+    ${!empty && !single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>\u590D\u5236\u73B0\u72B6\u7B80\u62A5</button>` : ""}
   </div>`;
   }
   function taskCard(p, t, i = 0) {
@@ -4368,14 +4649,13 @@
   </div>`;
   }
   function renderProjects() {
-    filtersEl.style.display = "";
     renderStats();
     let html = "";
     for (const g of GROUPS) {
-      const items = g.items.filter(matchesProj);
+      const items = sortProjects(g.items);
       if (!items.length) continue;
       const isFolded = folded.has(g.title);
-      const readyN = items.reduce((n, p) => n + p.tasks.filter((t) => t.status === "ready").length, 0);
+      const readyN = items.reduce((n, p) => n + readyOf(p), 0);
       html += `<div class="group-label ${g.folded !== void 0 ? "foldable" : ""} ${isFolded ? "folded" : ""}" data-group="${g.title}">
       ${g.folded !== void 0 ? '<svg class="ic ic-sm caret"><use href="#i-caret"/></svg>' : ""}${g.title}
       <span style="font-weight:500;opacity:.75">${items.length}${readyN ? ` \xB7 ${readyN} \u5F85\u5F00\u59CB` : ""}</span></div>`;
@@ -4383,12 +4663,23 @@
     }
     listEl.innerHTML = html;
   }
+  var TASK_ORDER = { doing: 0, ready: 1, blocked: 2, done: 3 };
+  var TASK_GROUP_TITLE = {
+    doing: "\u6B63\u5728\u505A",
+    ready: "\u5F85\u5F00\u59CB",
+    blocked: "\u88AB\u5361\u4F4F",
+    done: "\u5DF2\u5B8C\u6210"
+  };
+  var buildTaskList = (tasks) => [...tasks].sort((a, b) => TASK_ORDER[a.status] - TASK_ORDER[b.status] || a.pri - b.pri);
   function renderTasks(projKey) {
-    filtersEl.style.display = "none";
     const p = byKey(projKey);
-    const order = { ready: 0, doing: 1, blocked: 2, done: 3 };
-    const keep = (t) => filter === "ready" ? t.status === "ready" : filter === "doing" ? t.status === "doing" : filter === "done" ? t.status === "done" : true;
-    const list = p.tasks.filter(keep).sort((a, b) => order[a.status] - order[b.status] || a.pri - b.pri);
+    const list = buildTaskList(p.tasks);
+    const segments = [];
+    for (const t of list) {
+      const last2 = segments[segments.length - 1];
+      if (last2 && last2.status === t.status) last2.items.push(t);
+      else segments.push({ status: t.status, items: [t] });
+    }
     const { done, total } = prog(p);
     renderStats();
     const loading = !p.tasks.length && p.total > 0;
@@ -4396,7 +4687,10 @@
          <div class="empty-t">\u8FD9\u4E2A\u9879\u76EE\u8FD8\u6CA1\u62C6\u4EFB\u52A1</div>
          <div class="empty-d">\u8BA9 AI \u8BFB\u4E00\u904D\u4E0A\u4E0B\u6587\uFF0C\u628A\u5B83\u89C4\u5212\u6210\u51E0\u4E2A\u4EFB\u52A1\u5199\u8FDB\u5171\u4EAB\u5E93</div>
          <button class="btn btn-primary" data-split-proj="${p.key}"><svg class="ic"><use href="#i-split"/></svg>\u8BA9 AI \u62C6\u4EFB\u52A1</button>
-       </div>` : list.length ? `<div class="tlist">${list.map((t, i) => taskCard(p, t, i)).join("")}</div>` : `<div class="empty"><div class="empty-t">\u8FD9\u4E2A\u7B5B\u9009\u4E0B\u6CA1\u6709\u4EFB\u52A1</div><div class="empty-d">\u6362\u4E2A\u7B5B\u9009\u770B\u770B\uFF0C\u6216\u8005\u70B9\u300C\u5168\u90E8\u300D</div></div>`;
+       </div>` : list.length ? `<div class="tlist">${segments.map(
+      (seg) => `<div class="tgroup"><span class="tgroup-t">${TASK_GROUP_TITLE[seg.status]}</span><span class="tgroup-n">${seg.items.length}</span></div>` + seg.items.map((t) => taskCard(p, t, list.indexOf(t))).join("")
+    ).join("")}</div>` : `<div class="empty"><div class="empty-t">\u8FD9\u4E2A\u9879\u76EE\u6CA1\u6709\u4EFB\u52A1</div><div class="empty-d">\u70B9\u300C\u8BA9 AI \u62C6\u4EFB\u52A1\u300D\u628A\u5B83\u89C4\u5212\u6210\u51E0\u4E2A\u4EFB\u52A1\u5199\u8FDB\u5171\u4EAB\u5E93</div>
+         <button class="btn btn-primary" data-split-proj="${p.key}"><svg class="ic"><use href="#i-split"/></svg>\u8BA9 AI \u62C6\u4EFB\u52A1</button></div>`;
     listEl.innerHTML = `
   <div class="detail">
     <button class="d-nav" data-back="1"><svg class="ic"><use href="#i-back"/></svg>\u5168\u90E8\u9879\u76EE</button>
@@ -4424,7 +4718,7 @@
     const card = listEl.querySelector(`[data-proj="${key}"]`);
     const name = `vt-${key}`;
     if (card) card.style.viewTransitionName = name;
-    engine.setState("burst", clock);
+    setBotState("burst", clock);
     await transition(() => {
       view = { kind: "tasks", proj: key };
       renderTasks(key);
@@ -4465,7 +4759,7 @@
     }
     if (t.closest("[data-back]")) {
       await backToProjects();
-      engine.setState("wink", clock);
+      setBotState("wink", clock);
       return;
     }
     const splitP = t.closest("[data-split-proj]");
@@ -4478,7 +4772,11 @@
     const copyP = t.closest("[data-copy-proj]");
     if (copyP) {
       const p = byKey(copyP.dataset.copyProj);
-      await copyText(projBlock(p, p.tasks[0]), `${p.name} \xB7 ${p.tasks[0]?.title ?? ""}`);
+      if (p.total === 1 && p.tasks[0]) {
+        await copyText(projBlock(p, p.tasks[0]), `${p.name} \xB7 ${p.tasks[0].title}`);
+      } else {
+        await copyText(projBlock(p), `${p.name} \xB7 \u73B0\u72B6\u7B80\u62A5`);
+      }
       flash(copyP);
       return;
     }
@@ -4498,19 +4796,11 @@
       await gotoTasks(key);
     }
   });
-  filtersEl.addEventListener("click", async (e) => {
-    const chip = e.target.closest(".chip");
-    if (!chip) return;
-    filter = chip.dataset.filter;
-    filtersEl.querySelectorAll(".chip").forEach((c) => c.classList.toggle("is-on", c === chip));
-    if (view.kind === "projects") await transition(() => renderProjects());
-    else await transition(() => renderTasks(view.proj));
-  });
   function flash(btn) {
     btn.classList.add("done");
     const old = btn.innerHTML;
     btn.innerHTML = '<svg class="tick" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>\u5DF2\u590D\u5236';
-    engine.setState("burst", clock);
+    setBotState("burst", clock);
     setTimeout(() => {
       btn.classList.remove("done");
       btn.innerHTML = old;

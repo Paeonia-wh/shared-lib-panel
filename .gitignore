@@ -11,3 +11,7 @@ src-tauri/gen/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Python 编译缓存
+__pycache__/
+*.py[co]

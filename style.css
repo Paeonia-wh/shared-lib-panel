@@ -27,7 +27,10 @@
   --font: 'InterVariable', -apple-system, BlinkMacSystemFont, 'Segoe UI',
           'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif;
 
-  --ball: 72px;
+  /* 窗口 = 球本身。不留留白 —— 留白会把球撑大，用户要球小（明确要过"比 72 小四分之一"）。
+     代价：装饰超过 1 倍球半径的动作会被裁，所以只挑了装得下的放进随机播放
+     （orbit / play / notify / burst 四个因此没启用，见 main.ts 的动作表）。*/
+  --ball: 54px;    /* 用户定：72 的 3/4。别再改回去，也别为了塞动作放大它 */
   --panel-w: 384px;
   --ease-ios: cubic-bezier(.32, .72, 0, 1);
   --spring: cubic-bezier(.34, 1.3, .64, 1);
@@ -83,7 +86,9 @@ html, body {
 }
 .ball:hover { transform: scale(1.05); }
 
+
 /* ⑪ 出场（2.6s）：由远及近(1.4s) → 跳过.来砸下 → 弹两下 → 转圈落定 */
+/* 动画挂在 .dot 而不是画布：画布带一片留白，缩放画布会让留白一起缩放，看着像整个窗口在跳 */
 .ball { animation: ballIn 2.6s linear both; will-change: transform, filter; }
 .ball.settled { animation: none; }
 @keyframes ballIn {
@@ -115,7 +120,17 @@ html, body {
 
 
 .ball.dragging { transition: none; cursor: grabbing; }
-.ball svg { width: 100%; height: 100%; display: block; overflow: visible; }
+/* SVG 撑满球。
+   --bot-scale：动作需要比球更大范围时（notify/burst/play/orbit），
+   由 main.ts 的 setBotState 把这个变量改成小于 1 的值，整个画面等比缩进球里。
+   锚点取中心 = 球心（SVG 撑满且球在正中心，所以中心就是球心）。
+   过渡给 .4s：和引擎的状态形变时长（0.4~0.6s）接近，缩下去和形变一起发生，看不突兀。 */
+.ball svg {
+  width: 100%; height: 100%; display: block; overflow: visible;
+  transform: scale(var(--bot-scale, 1));
+  transform-origin: center center;
+  transition: transform .4s ease;
+}
 
 /* ================= 面板（玻璃只在外壳） ================= */
 .panel {
@@ -179,22 +194,39 @@ html, body {
 }
 .sw:hover { transform: scale(1.16); }
 .sw.is-on { box-shadow: 0 0 0 1.5px #fff, 0 0 0 3px var(--ink); }
-
-/* 筛选：文字型，选中用下划线式强调（不用彩色胶囊） */
-.p-filters { display: flex; gap: 2px; padding: 0 12px 10px; border-bottom: 1px solid var(--line); }
-.chip {
-  font: inherit; font-size: 11.5px; font-weight: 550; color: var(--ink-2);
-  background: rgba(11,11,14,.045); border: 0; border-radius: 8px;
-  padding: 5px 10px; cursor: pointer;
-  transition: color .16s ease, background .16s ease, transform .16s var(--spring);
+/* 调色盘末尾的「自动」按钮：回到自动换色 / 换形状。
+   故意做得和其它色块不一样（虚线圈 + 一个字），一眼能认出它不是某个颜色。 */
+.sw-auto {
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 10px; font-weight: 600; line-height: 1;
+  display: grid; place-items: center;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+  transition: color .16s ease, box-shadow .16s ease, transform .16s var(--spring);
 }
-.chip:hover { color: var(--ink); background: rgba(11,11,14,.04); }
-.chip.is-on { color: #fff; background: var(--ink); font-weight: 600; }
-.chip b { font-weight: 600; opacity: .55; margin-left: 3px; font-variant-numeric: tabular-nums; }
+.sw-auto:hover { color: var(--ink); }
+.swatches.is-auto .sw-auto { color: #fff; background: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
 
-.p-list { padding: 6px 8px 10px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+/* 构建时间戳：一眼看出面板跑的是哪一版（排障用，不是装饰） */
+.p-build {
+  margin-left: 6px; font-size: 9.5px; font-weight: 500;
+  color: var(--ink-3); opacity: .75; font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+}
+
+/* 筛选条已移除（2026-09-15 用户要求：不要「全部/今日/进行中…」，把任务直接列出来） */
+.p-list { padding: 8px 8px 10px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .p-list::-webkit-scrollbar { width: 8px; }
 .p-list::-webkit-scrollbar-thumb { background: rgba(11,11,14,.12); border-radius: 99px; border: 2px solid transparent; background-clip: content-box; }
+
+/* 任务分段标题：正在做 / 待开始 / 被卡住 / 已完成 */
+.tgroup {
+  display: flex; align-items: center; gap: 6px;
+  padding: 9px 4px 4px; margin-top: 3px;
+}
+.tgroup:first-child { margin-top: 0; }
+.tgroup-t { font-size: 10.5px; font-weight: 650; color: var(--ink-3); letter-spacing: .04em; }
+.tgroup-n { font-size: 10px; color: var(--ink-3); opacity: .7; font-variant-numeric: tabular-nums; }
 
 /* 分组：小号、全大写感的字距、右侧一条细线 */
 .group-label {
@@ -259,14 +291,21 @@ html, body {
 
 .card-copy {
   position: absolute; right: 9px; bottom: 8px;
-  font: inherit; font-size: 11px; font-weight: 550; line-height: 1;
-  color: #fff; background: var(--ink); border: 0; border-radius: 8px;
-  padding: 6px 10px;
-  opacity: 0; transform: translateY(3px) scale(.97);
-  transition: all .18s var(--spring); cursor: pointer;
+  /* 幽灵按钮：和 .tcopy 一套语言，悬停才翻实心。项目卡在项目列表里常驻显示，
+     所以默认状态必须安静 —— 四个黑色实心块竖着排太吵。 */
+  font: inherit; font-size: 10.5px; font-weight: 520; line-height: 1;
+  color: var(--ink); background: #fff; border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  padding: 5px 9px;
+  opacity: 0; transform: translateY(2px);
+  transition: opacity .18s ease, transform .18s var(--spring),
+              background .16s ease, color .16s ease, border-color .16s ease;
+  cursor: pointer;
 }
 .card:hover .card-copy { opacity: 1; transform: none; }
-.card-copy.done { background: var(--green); }
+.card-copy:hover { color: #fff; background: var(--ink); border-color: var(--ink); }
+.card-copy:active { transform: scale(.97); }
+.card-copy.done { color: #fff; background: var(--green); border-color: var(--green); }
 
 /* ================= 详情 ================= */
 .detail { padding: 6px 8px 10px; overflow-y: auto; }
@@ -340,25 +379,35 @@ html, body {
 
 .tcopy {
   position: absolute; right: 9px; bottom: 8px;
-  font: inherit; font-size: 11px; font-weight: 550; line-height: 1;
-  color: var(--ink); background: #fff; border: 1px solid var(--line-2); border-radius: 8px;
-  padding: 6px 10px; cursor: pointer;
-  min-width: 94px; justify-content: center;    /* 复制接续块 → 已复制：宽度稳住 */
+  /* 与 .card-copy 同一套幽灵按钮语言（2026-09-15 统一） */
+  font: inherit; font-size: 10.5px; font-weight: 520; line-height: 1;
+  color: var(--ink); background: #fff; border: 1px solid var(--line-2); border-radius: var(--r-sm);
+  padding: 5px 9px; cursor: pointer;
+  min-width: 88px; justify-content: center;    /* 复制接续块 → 已复制：宽度稳住 */
   transition: background .16s ease, color .16s ease, border-color .16s ease, transform .12s var(--spring);
 }
 .tcopy:hover { color: #fff; background: var(--ink); border-color: var(--ink); }
 .tcopy:active { transform: scale(.97); }
 .tcopy.done { color: #fff; background: var(--green); border-color: var(--green); }
 
-/* 单任务/空项目：项目卡右侧的常驻操作按钮（明确成块，不再像一行字） */
+/* 单任务/多任务/空项目：项目卡右侧的常驻操作按钮
+   2026-09-15 重做：原来是黑色实心大胶囊（padding 7×11、圆角 9px、还带投影），
+   又大又抢眼，而且三处违反本项目自己的设计规则：
+     ① 圆角只留三档（--r-lg/md/sm），9px 不在档位里；
+     ② 卡片不靠阴影靠细线，它却挂了 box-shadow；
+     ③ 面板本来就走"安静"路线，四个黑块竖着一列太吵。
+   改成和 .tcopy 完全一致的幽灵按钮：白底 + 细线 + 深字，悬停才翻成实心。
+   尺寸也收了：字号 11→10.5，内边距 7×11 → 5×9，圆角落到 --r-sm。 */
 .card-copy.always {
   position: static; flex: none;
   opacity: 1; transform: none;
-  padding: 7px 11px; border-radius: 9px;
-  min-width: 74px; justify-content: center;   /* 让 AI 拆任务 → 已复制 也不跳 */
-  box-shadow: 0 1px 2px rgba(11,11,14,.16);
+  padding: 5px 9px;
+  border-radius: var(--r-sm);
+  font-size: 10.5px;
+  font-weight: 520;
+  min-width: 62px;
+  justify-content: center;   /* 「拆任务」→「已复制」宽度稳住，不跳 */
 }
-.card-copy.always:hover { background: #000; }
 
 
 /* ==================================================================
@@ -376,8 +425,8 @@ html, body {
 @keyframes rippleOut { to { transform: scale(1); opacity: 0; } }
 
 /* ① 过冲回弹：按下去缩过头，松手弹回 */
-.btn, .chip, .card-copy, .tcopy, .d-nav, .sw { transition-timing-function: var(--spring); }
-.btn:active, .chip:active, .card-copy:active, .tcopy:active, .d-nav:active { transform: scale(.93); }
+.btn, .card-copy, .tcopy, .d-nav, .sw { transition-timing-function: var(--spring); }
+.btn:active, .card-copy:active, .tcopy:active, .d-nav:active { transform: scale(.93); }
 .sw:active { transform: scale(.9); }
 
 /* ⑤ 笔画勾选：复制成功后那个勾一笔画出来 */
@@ -396,16 +445,15 @@ html, body {
 }
 
 /* ⑩ 底部停顿：面板先滑出，停一拍，内容再淡入 */
-.p-head, .swatches, .p-filters, .p-list {
+.p-head, .swatches, .p-list {
   opacity: 0; transform: translateY(8px);
   transition: opacity .26s ease, transform .32s var(--ease-ios);
 }
-.panel.open .p-head, .panel.open .swatches, .panel.open .p-filters, .panel.open .p-list {
+.panel.open .p-head, .panel.open .swatches, .panel.open .p-list {
   opacity: 1; transform: none;
 }
 .panel.open .p-head    { transition-delay: .07s; }
 .panel.open .swatches  { transition-delay: .11s; }
-.panel.open .p-filters { transition-delay: .14s; }
 .panel.open .p-list    { transition-delay: .17s; }
 
 
@@ -430,7 +478,7 @@ html, body {
 
 
 /* 涟漪宿主需要定位上下文：给静态按钮补上（有自己定位的不要动） */
-.btn, .chip, .d-nav, .sw { position: relative; }
+.btn, .d-nav, .sw { position: relative; }
 
 
 /* ===== 真桌面（Tauri）模式：不要模拟背景，让真实桌面透过来 ===== */

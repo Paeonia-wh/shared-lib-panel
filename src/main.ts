@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 共享项目库 · 悬浮球 ｜ v4
  * 层级：项目列表 → 点项目 → 任务卡片（每张卡单独复制）
  * 规则：项目只有 1 个任务 → 项目卡上直接给复制；多任务 → 点进去，逐任务复制
@@ -6,7 +6,7 @@
  */
 import { BotEngine, type BotFrame } from './bot/engine'
 import { RAYON, DEMI_VIEWBOX } from './bot/repere'
-import { mixHex, COLORS } from './bot/skins'
+import { mixHex, COLORS, SHAPES, SHAPE_BY_ID, DEFAULT_SHAPE } from './bot/skins'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { isTauri, initTauri, expandWindow, collapseWindow, beginDrag, dragBy } from './tauri'
@@ -18,6 +18,10 @@ const PAPER = '#eceff4'
 /* ============ 颜色 ============ */
 const savedInk = (() => { try { return localStorage.getItem('bloub-ink') } catch { return null } })()
 const initialInk = savedInk && COLORS.some((c) => c.hex === savedInk) ? savedInk : COLORS[0].hex
+/* 自动模式 = 球自己轮颜色和形状。你手动点过调色盘就关掉（色锁住，存 localStorage，
+   重启也记得）；点调色盘末尾的「自」按钮回到自动。 */
+let inkAuto = !savedInk
+let inkLastChangedAt = 0
 let inkFrom = initialInk, inkTo = initialInk, inkT = 1
 const INK_DUR = 0.42
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3)
@@ -71,13 +75,13 @@ const ballEl = document.getElementById('ball') as HTMLDivElement
 
 /* ⑪ 出场：飞入期间转个圈，落定后回 idle（只播一次） */
 window.addEventListener('DOMContentLoaded', () => {
-  engine.setState('orbit', 0)   /* 转圈：从远处一路转过来 */
+  setBotState('orbit', 0)   /* 转圈：从远处一路转过来 */
   const settle = () => {
     if (ballEl.classList.contains('settled')) return
     ballEl.classList.add('settled')
-    engine.setState('idle', clock)
+    setBotState('idle', clock)
   }
-  setTimeout(() => engine.setState('wink', clock), 1950)
+  setTimeout(() => setBotState('wink', clock), 1950)
   ballEl.addEventListener('animationend', settle, { once: true })
   setTimeout(settle, 1200)   /* 兜底①：Tauri 里动画事件偶尔不触发，球会卡在缩小帧 */
   setTimeout(settle, 2700)   /* 兜底② */
@@ -88,6 +92,8 @@ function tick(now: number) {
   const dt = Math.min((now - last) / 1000, 0.05)
   last = now; clock += dt
   if (inkT < 1) inkT = Math.min(1, inkT + dt / INK_DUR)
+  tickAutoplay(clock)     /* 动作：没人理它的时候自己动 */
+  tickAutoSkin(clock)     /* 形状与颜色：节奏更慢，和动作错开 */
   svg.innerHTML = frameMarkup(engine.sample(clock), curInk())
   requestAnimationFrame(tick)
 }
@@ -101,22 +107,250 @@ initTauri().then(async () => {
 })
 requestAnimationFrame(tick)
 
+/* ============ 自动动作：没人理它的时候自己动 ============
+ *
+ * 用户要求（2026-09-15）："让他加一点动态感自己动起来，现在是我鼠标动它才会动，
+ * 鼠标不动它就一直盯着那个方向盘"——所以要有自己的节奏。
+ * 后来要求"把上游所有动作全部搞进去" + "动作塞不下你可以改嘛，反正都是开源的"
+ * ——所以不砍动作，改成**按需整体缩小**让它们装下（见 ACTION_SCALE）。
+ *
+ * 上游 bloub 的完整清单见 jeremy-prt/bloub 的 SEQUENCE，共 14 个。
+ * 窗口 = 球本身 = 54px，球半径 27px，所以画布给到的极限就是 **1.00R**。
+ *
+ * 各动作的绘制范围（从 decor.ts 的常量算出来，单位 R）：
+ *   wink/wide/egg/hexagon/exclaim/comet  1.00R  —— 正好贴边，不用缩
+ *   alert  0.87R · thinking 0.76R · sleep 0.35R  —— 本来就有余量
+ *   notify 1.15R（蓝点在 1.003R 处 + 自身半径 0.15）
+ *   burst  1.05R（往外飞的粒子）
+ *   play   1.38R（SWOOSH 光带）
+ *   orbit  1.40R（RINGS 六道光环）
+ *
+ * 上面四个超出 1.00R —— 不砍掉，改为**只在它们播放时把整个画面缩到 1.00R 以内**
+ * （ACTION_SCALE）。缩的是渲染层，不动引擎的上游测量值：所有几何、掩码、描边
+ * 一起等比缩，画面本身完全不变，只是这个动作期间球显得略小一点 ——
+ * 换来的是"上游全部 14 个动作都能看到"。
+ *
+ * `swirl` 仍然不纳入：上游标注它是"界面转场，不是动作目录里的一员"
+ * （transition d'interface, pas une animation du catalogue : hors SEQUENCE）。
+ *
+ * 权重分层：小幅表情（眨眼、歪头）出现得多，变形和大幅动作少一些。
+ */
+const AUTOPLAY_ACTIONS: { id: string; w: number }[] = [
+  /* —— 小幅表情：常来，最自然 —— */
+  { id: 'wink', w: 5 },      // 眨眼
+  { id: 'thinking', w: 4 },  // 歪头想事
+  { id: 'wide', w: 3 },      // 睁大眼
+  /* —— 中等：偶尔 —— */
+  { id: 'alert', w: 2 },     // 感叹号冲出来
+  { id: 'exclaim', w: 2 },   // 变成一个感叹号
+  { id: 'egg', w: 2 },       // 缩成一颗蛋
+  { id: 'hexagon', w: 2 },   // 变六边形
+  { id: 'notify', w: 2 },    // 蓝点提示
+  /* —— 少见：大幅演出 —— */
+  { id: 'sleep', w: 1 },     // 缩成小球上下浮（像睡着）
+  { id: 'comet', w: 1 },     // 缩成一点 + 拖尾
+  { id: 'burst', w: 1 },     // 炸开成粒子再重组
+  { id: 'play', w: 1 },      // 三角 + 光带扫过
+  { id: 'orbit', w: 1 },     // 三角绕圈 + 六道光环
+]
+const AUTOPLAY_TOTAL_W = AUTOPLAY_ACTIONS.reduce((n, a) => n + a.w, 0)
+
+/* 各状态的持续时间（秒）。取自 states.ts 的 duration，留一点余量再回到 idle。 */
+const ACTION_HOLD: Record<string, number> = {
+  wink: 1.6, wide: 1.8, thinking: 2.6, alert: 2.4, exclaim: 2.0, notify: 2.2,
+  egg: 1.8, hexagon: 1.6, sleep: 2.4, comet: 2.4, burst: 2.6, play: 2.0, orbit: 3.4,
+}
+
+/* 播放这些动作时把整个画面缩到 1.00R 以内。
+   系数 = 1.00 / 该动作的最大绘制范围（上面注释里那几个数），再取整到两位。
+   没列出来的动作一律按 1 处理（不缩）。 */
+const ACTION_SCALE: Record<string, number> = {
+  notify: 0.87,   // 1.15R → 1.00R
+  burst: 0.95,    // 1.05R → 1.00R
+  play: 0.72,     // 1.38R → 0.99R
+  orbit: 0.71,    // 1.40R → 0.99R
+}
+
+/* 自动形状和自动换色。
+ *
+ * 用户要求："不仅仅动作吧，他不是还会变形状吗，反正都是全都结合起来。"
+ * 上游本来就带两套可换的东西：
+ *   - 形状：skins.ts 的 SHAPES（圆形 / 方圆 / 三角 / 六边形 / 水滴 / 胶囊）
+ *   - 颜色：COLORS 的 12 色
+ * 以前这两样只能手动点，现在让它自己也轮。
+ *
+ * 两条调度线跟动作那条分开，节奏错开：
+ *   动作   4~11 秒一次（变化快，是"活着"的感觉）
+ *   形状  25~50 秒一次（变化慢，太快了晃眼）
+ *   换色  35~70 秒一次
+ *
+ * 换形状只在**空闲**时做：动作播放期间球体由动作自己掌控（egg/hexagon/exclaim
+ * 这些状态声明了 baseBody=false，就是用它们自己的形体），这时候插一脚会打架。
+ * 引擎的 setState 带 0.45s 形变，所以换形状是"慢慢变过去"而不是硬切。
+ */
+const AUTO_SHAPE_IDS = SHAPES.map((s) => s.id).filter((id) => id !== DEFAULT_SHAPE)
+
+function scheduleAutoShape(from: number) {
+  shapeNextAt = from + 3 + Math.random() * 6      // 3~9 秒
+}
+function scheduleAutoColor(from: number) {
+  colorNextAt = from + 4 + Math.random() * 6      // 4~10 秒
+}
+
+/** 空闲时才轮换形状和颜色；有动作在播、或用户在操作时跳过。 */
+function tickAutoSkin(now: number) {
+  if (autoPlistState) return                              // 动作期间不抢
+  const busy = (lookOverride !== null && lookOverride.mix > NEAR_MIX) || (now - lastMouseMoveAt < 1.5)
+  /* 忙的时候只是不动，**不重置倒计时** —— 否则用户一直动鼠标，倒计时永远归零，
+     松手后还要重新等一整个间隔。 */
+  if (busy) return
+
+  if (now >= shapeNextAt) {
+    /* 轮流换，别连着两次同一个；也允许偶尔变回圆 */
+    const pool = [DEFAULT_SHAPE, ...AUTO_SHAPE_IDS].filter((id) => id !== inkShapeId)
+    const next = pool[Math.floor(Math.random() * pool.length)]
+    const sp = SHAPE_BY_ID.get(next)
+    if (sp) {
+      inkShapeId = next
+      engine.setShape([...sp.radii], now)          // 引擎做 0.45s 形变
+      scheduleAutoShape(now)
+      visualHoldUntil = now + 1.2                  // 让动作等一步，别立刻盖过去
+    }
+  }
+  if (inkAuto && now >= colorNextAt) {
+    const pool = COLORS.filter((c) => c.hex !== inkTo)
+    const next = pool[Math.floor(Math.random() * pool.length)]
+    if (next) {
+      setColor(next.hex)
+      inkLastChangedAt = now
+      scheduleAutoColor(now)
+      visualHoldUntil = now + 1.2
+    }
+  }
+  if (!inkAuto) colorNextAt = now + 999            // 手动模式：不再安排换色
+}
+
+const NEAR_MIX = 0.25          // 鼠标多近算"用户在跟它互动"
+let nextAutoAt = 0             // 下一次自动动作的时间（引擎时钟）
+let autoPlistState: string | null = null
+let lastAutoStart = 0
+let lookOverride: any = null   // 鼠标给的注视目标；null = 鼠标很久没动，交还给引擎
+let lastMouseMoveAt = -999     // 鼠标**真的移动**过的时刻（不是收到事件的时刻）
+let lastMouseXY = { x: -9999, y: -9999 }
+let shapeNextAt = 0            // 下一次换形状
+let colorNextAt = 0            // 下一次换色
+let inkShapeId: string = DEFAULT_SHAPE
+/* 形状/颜色刚变过的一小段时间里不让动作抢场 —— 否则动作每 4~11 秒来一次、
+   每次持续 1.6~3.4 秒，空闲窗口被吃得差不多，形状和颜色根本轮不到。 */
+let visualHoldUntil = 0
+
+function scheduleNextAuto(from: number) {
+  nextAutoAt = from + 4 + Math.random() * 7     // 4~11 秒
+}
+
+function pickAutoAction(): string {
+  let r = Math.random() * AUTOPLAY_TOTAL_W
+  for (const a of AUTOPLAY_ACTIONS) {
+    r -= a.w
+    if (r <= 0) return a.id
+  }
+  return 'wink'
+}
+
+/**
+ * 切状态 + 自动管缩放。
+ *
+ * 为什么要缩放：窗口 = 球本身，画布能给到的极限就是 1.00R；
+ * notify / burst / play / orbit 四个动作的装饰会伸到 1.05~1.40R，直接播会被裁。
+ * 与其砍掉它们，不如**播放期间把整个画面等比缩小**（ACTION_SCALE），
+ * 播完再放回去。缩的是渲染层，不动引擎里那些从参考视频量出来的几何值 ——
+ * 所以掩码、描边、渐变全都跟着一起缩，画面本身不会变形。
+ *
+ * 实现放在 SVG 元素上（不是每个路径上）：SVG 撑满球、球在正中心，
+ * transform-origin 取中心正好是球心，缩放锚点天然对；而且能吃到 CSS 过渡，平滑。
+ * 所有切状态的地方都走这个函数，别直接调 engine.setState —— 否则缩放会漏掉。
+ */
+function setBotState(id: string, now: number) {
+  const k = ACTION_SCALE[id] ?? 1
+  svg.style.setProperty('--bot-scale', String(k))
+  engine.setState(id as any, now)
+}
+
+/** 每帧调一次：随机干活、干完回 idle、鼠标靠近就让位。 */
+function tickAutoplay(now: number) {
+  if (autoPlistState) {
+    const st = autoPlistState
+    const hold = ACTION_HOLD[st] ?? 2.4
+    if (now - lastAutoStart >= hold) {
+      setBotState('idle', now)
+      autoPlistState = null
+      scheduleNextAuto(now)
+    }
+    return
+  }
+  /* 用户在跟它互动（鼠标靠近或刚动过）就让位，不抢戏 */
+  /* 关键：判"用户在用"看的是**鼠标真的在动**，不是"收到 mousemove 事件"。
+     浏览器里鼠标停着不动也会持续发 mousemove，用事件时间戳判会让 busy 永远为真
+     —— 实测过：鼠标移到很远（mix=0）时 busy 仍然 600/600 帧为真，小球永远不动。
+     所以按位移>2px 才算"动了"（顺带把抖动噪声滤掉）。 */
+  const busy =
+    (lookOverride !== null && lookOverride.mix > NEAR_MIX) ||
+    (now - lastMouseMoveAt < 1.5)
+  if (busy) { nextAutoAt = Math.max(nextAutoAt, now + 2); return }
+  /* 形状/颜色刚变过：先让它们被看见，动作推迟一下再上 */
+  if (now < visualHoldUntil) { nextAutoAt = Math.max(nextAutoAt, visualHoldUntil + 0.3); return }
+  if (now >= nextAutoAt) {
+    const id = pickAutoAction()
+    autoPlistState = id
+    lastAutoStart = now
+    setBotState(id as any, now)
+    /* 顺手让眼神也跟着偏一点，别每次都是同一个"死鱼眼"角度 */
+    engine.setLook({ yaw: (Math.random() - 0.5) * 26, pitch: (Math.random() - 0.5) * 12, mix: 0.6, spin: 0, wander: 1 }, now)
+  }
+}
+
 document.addEventListener('mousemove', (e) => {
   const r = ballEl.getBoundingClientRect()
   const cx = r.left + r.width / 2, cy = r.top + r.height / 2
   const dx = e.clientX - cx, dy = e.clientY - cy
   const dist = Math.hypot(dx, dy) || 1
   const near = Math.max(0, Math.min(1, 1 - (dist - 70) / 520))
-  engine.setLook({ yaw: (dx / dist) * 24 * near, pitch: (dy / dist) * 15 * near, mix: near, spin: 0, wander: 1 - near }, clock)
+  lookOverride = { yaw: (dx / dist) * 24 * near, pitch: (dy / dist) * 15 * near, mix: near, spin: 0, wander: 1 - near }
+  /* 只有真的移动了才记时间。停着不动的 mousemove 不算"用户在用"，
+     否则自动动作永远轮不到 —— 见 tickAutoplay 里的说明。 */
+  if (Math.hypot(e.clientX - lastMouseXY.x, e.clientY - lastMouseXY.y) > 2) {
+    lastMouseXY = { x: e.clientX, y: e.clientY }
+    lastMouseMoveAt = clock
+  }
+  engine.setLook(lookOverride, clock)
 })
+
+/* 鼠标离开窗口 / 很久不动 → 把注视交还给自动动作，别一直死盯一个方向 */
+window.addEventListener('blur', () => { lookOverride = null })
+setInterval(() => {
+  if (lookOverride && clock - lastMouseMoveAt > 3) {
+    lookOverride = null
+    engine.setLook(null, clock)     // 交还给引擎自己的 idle 微动
+  }
+}, 1000)
 
 /* ============ 面板 ============ */
 const panel = document.getElementById('panel') as HTMLElement
 const listEl = document.getElementById('list') as HTMLElement
-const filtersEl = document.getElementById('filters') as HTMLElement
+/* 筛选条已移除（用户要求：不要「全部/今日/进行中…」，直接把任务全列出来） */
 const swatchesEl = document.getElementById('swatches') as HTMLElement
 const statsEl = document.getElementById('stats') as HTMLElement
 let open = false
+
+/* 构建时间戳：一眼看出面板跑的是哪一版。
+   为什么要有它：改完前端重启面板后，无法确认"看到的到底是新是旧"——
+   这条路我已经绕过一次弯（查 exe 内嵌、查 WebView2 缓存，都不确定）。
+   现在把构建时间写在标题旁边，是不是新的一眼就知道。 */
+;(() => {
+  const meta = document.querySelector('meta[name="panel-build"]')
+  const stamp = document.getElementById('buildStamp')
+  if (stamp) stamp.textContent = meta ? (meta.getAttribute('content') || 'dev') : 'dev'
+})()
 
 function positionPanel() {
   const r = ballEl.getBoundingClientRect()
@@ -143,7 +377,7 @@ function openPanel() {
   open = true
   positionPanel()
   panel.classList.add('open'); panel.setAttribute('aria-hidden', 'false')
-  engine.setState('orbit', clock)
+  setBotState('orbit', clock)
   expandWindow()
   startRefresh()   /* 轮询兜底；SSE 是主通道，已在启动时常驻连接 */
   /* ⑦ 数字缓停：等内容淡入后再滚数字 */
@@ -155,7 +389,7 @@ function closePanel() {
   if (!open) return
   open = false; view = { kind: 'projects' }
   panel.classList.remove('open'); panel.setAttribute('aria-hidden', 'true')
-  engine.setState('idle', clock)
+  setBotState('idle', clock)
   collapseWindow()
   stopRefresh()
 }
@@ -172,20 +406,53 @@ COLORS.forEach((c) => {
   b.style.setProperty('--c', c.hex); b.dataset.hex = c.hex
   swatchesEl.appendChild(b)
 })
+/* 调色盘末尾多一个「自动」小按钮：回到自动换色/换形状的状态。
+   规矩很简单 —— 只要你手动点过任何一个色，就进入手动模式（色被锁住，存进 localStorage，
+   重启也记得）；点「自动」就解锁，球自己轮色轮形状。 */
+const autoBtn = document.createElement('button')
+autoBtn.className = 'sw sw-auto'
+autoBtn.title = '自动换色 / 换形状'
+autoBtn.textContent = '自'
+swatchesEl.appendChild(autoBtn)
+
+function renderAutoSwatch() {
+  /* 「自」按钮只在自动模式下点亮；手动模式时 12 个色里有一个是亮的 */
+  swatchesEl.classList.toggle('is-auto', inkAuto)
+}
+
 swatchesEl.addEventListener('click', (e) => {
-  const b = (e.target as HTMLElement).closest('.sw') as HTMLElement | null
+  const t = e.target as HTMLElement
+  if (t.closest('.sw-auto')) {
+    /* 回到自动：清掉手动选择，球接着自己轮 */
+    inkAuto = true
+    swatchesEl.querySelectorAll('.sw').forEach((s) => s.classList.remove('is-on'))
+    try { localStorage.removeItem('bloub-ink') } catch { }
+    renderAutoSwatch()
+    setBotState('wink', clock)
+    return
+  }
+  const b = t.closest('.sw') as HTMLElement | null
   if (!b) return
+  inkAuto = false                                   /* 手动点色 = 锁定，不再自动换 */
   swatchesEl.querySelectorAll('.sw').forEach((s) => s.classList.toggle('is-on', s === b))
+  renderAutoSwatch()
   setColor(b.dataset.hex!)
-  try { localStorage.setItem('bloub-ink', b.dataset.hex!) } catch {}
-  engine.setState('wink', clock)
+  try { localStorage.setItem('bloub-ink', b.dataset.hex!) } catch { }
+  setBotState('wink', clock)
 })
+renderAutoSwatch()
 
 /* ============ 数据：项目 → 任务 ============ */
 type TaskStatus = 'ready' | 'doing' | 'done' | 'blocked'
-type Task = { key: string; title: string; status: TaskStatus; pri: number; owner?: string; depends?: string[] }
+type Task = {
+  key: string; title: string; status: TaskStatus; pri: number; owner?: string; depends?: string[]
+  raw?: string           /* 库里原始状态，用于区分「真被卡住」和「只是有依赖」 */
+  desc?: string          /* 库里的任务说明：真正的任务书，常带"别再查一遍"的交接暗号 */
+  nextAct?: string       /* 库里别人留的下一步 */
+}
 type Proj = {
   key: string; name: string; sub: string; tags: string[]; ago: string
+  scope?: string         /* 库里的项目一句话定位（每个项目都有） */
   tasks: Task[]
   total: number; done: number; ready: number; doing: number; failed: number
   kind: string; isTest: boolean; ctrl: string; root: string
@@ -274,6 +541,7 @@ function applyProjects(list: any[]): void {
       key: r.project_key,
       name: r.name || r.project_key,
       sub: String(r.root_path || '').replace(/^[A-Z]:\\/i, ''),
+      scope: String(r.scope || '').trim(),
       tags: parseTags(r.tags),
       ago: relTime(r.updated_at),
       tasks: (prev.get(r.project_key)?.fromDb ? prev.get(r.project_key)!.tasks : []),
@@ -309,10 +577,20 @@ export async function loadTasks(key: string): Promise<void> {
       title: t.title || t.key,
       status: t.status === 'done' ? 'done'
         : t.status === 'failed' || t.status === 'cancelled' ? 'blocked'
-        : (t.owner ? 'doing' : (t.deps > 0 ? 'blocked' : 'ready')),
+        /* 库里显式标了 blocked 就照实显示（2026-09-15 对账发现：
+           以前没有这个分支，blocked 会被降级成「进行中」或「待开始」，
+           和共享库里写的对不上）。 */
+        : t.status === 'blocked' ? 'blocked'
+        /* 只有"未完成的前置"才算被卡住。
+           以前用 deps（总前置数），导致前置全做完的任务永远显示成等待中
+           —— 对账发现 cross-consistency 的 5 个前置全 done 了还被标卡住。 */
+        : (t.owner ? 'doing' : (t.unmet_deps > 0 ? 'blocked' : 'ready')),
+      raw: t.status,
       pri: typeof t.priority === 'number' ? t.priority : 9,
       owner: t.owner ? String(t.owner).replace(/^session-/, '').slice(0, 12) : undefined,
       depends: t.dep_keys ? String(t.dep_keys).split(', ').filter(Boolean) : [],
+      desc: String(t.description || '').trim(),
+      nextAct: String(t.next_action || '').trim(),
     })) as Task[]
     p.fromDb = true
   } catch (e) {
@@ -390,34 +668,144 @@ function projState(p: Proj): { cls: string; label: string; icon: string } {
 }
 
 /* ============ 复制文本 ============ */
-function projBlock(p: Proj, t?: Task): string {
-  if (t) {
-    return [
-      `【接续 ${p.name} · ${t.key}】`,
-      `任务：${t.title}`,
-      `状态：${taskLabel(t).label}`,
-      t.depends?.length ? `依赖：${t.depends.join('、')}` : '',
-      ``,
-      `请先 project_context_pack(project="${p.key}", task_id="${t.key}") 读上下文（含别人踩过的坑），把这个任务做完。`,
-      `收尾必须自动沉淀：project_checkpoint + project_artifact_publish + project_task_update(done)，不要问我。`,
-    ].filter(Boolean).join('\n')
-  }
-  return [
-    `【接续 ${p.name}（project_key: ${p.key}）】`,
-    `请先 project_context_pack 读上下文，看 project_ready_tasks 领一个没被领的任务做完。`,
-    `收尾必须自动沉淀：project_checkpoint + project_artifact_publish + project_task_update(done)，不要问我。`,
-  ].join('\n')
+/*
+ * 设计要点（2026-09-15 用户定案）：
+ *  1) 复制块必须"按项目"，不是一刀切的套话。项目定位取自库里的 project.scope，
+ *     任务说明取自 task.description —— 后者常带"不要再查一遍的事实""已尝试并完整撤销"
+ *     这类交接暗号，是跨会话不重复踩坑的关键，以前一个字都没带。
+ *  2) 执行要求里**不再写"不要问我"**——哪些该自己定、哪些该来问，交给 AI 自己判断；
+ *     但沉淀照样要求，否则下个会话会把同样的事重问一遍。
+ *  3) 库里没写说明时不编，如实标注"库里没写"，让接手的人知道该去补。
+ */
+/* 前置是否真的没做完。
+   以前只要 depends 非空就一律标「卡在…」——对账发现 cross-consistency 的 5 个前置
+   其实全都 done 了，面板却还在说"卡住"，属于冤枉。所以要查前置的实际状态。 */
+function unmetDeps(p: Proj, t: Task): string[] {
+  if (!t.depends?.length) return []
+  const byKey = new Map(p.tasks.map((x) => [x.key, x]))
+  return t.depends.filter((k) => {
+    const dep = byKey.get(k)
+    return dep ? dep.status !== 'done' : true   /* 查不到就保守当作未完成 */
+  })
 }
 
-function splitBlock(p: Proj): string {
+export function statusLine(p: Proj, t: Task): string {
+  const base = taskLabel(t).label
+  const unmet = unmetDeps(p, t)
+  if (t.status === 'done') return `${base}${t.owner ? ` · ${t.owner}` : ''}`
+  if (t.status === 'doing') return `${base}${t.owner ? ` · 已被 ${t.owner} 领走` : ''}`
+  if (t.status === 'blocked') {
+    if (unmet.length) return `${base} · 卡在 ${unmet.join('、')}`
+    /* 库里标 blocked 但没有未完成的前置 —— 说明卡在别的地方（等客户、等资质等），
+       不能编一个"卡在谁"，如实说"无未完成的前置"。 */
+    return `${base} · 库里标了 blocked${t.depends?.length ? `（前置 ${t.depends.join('、')} 都已完成）` : ''}`
+  }
+  /* ready：有前置就说明前置已就绪 */
+  if (t.depends?.length) return `${base} · 前置已就绪${t.owner ? `，已被 ${t.owner} 领走` : '，还没人领'}`
+  return `${base} · 还没人领`
+}
+
+export function projBlock(p: Proj, t?: Task): string {
+  if (t) {
+    const body: string[] = []
+    body.push(`【继续做 · ${p.name} / ${t.key}】`)
+    if (p.scope) body.push(`项目：${p.scope}`)
+    body.push('')
+    body.push(`任务：${t.title}`)
+    body.push(`状态：${statusLine(p, t)}`)
+    body.push(`依赖：${t.depends?.length ? t.depends.join('、') : '无'}`)
+    body.push('')
+    if (t.desc) {
+      body.push('接续说明（库里原始记录，含别人踩过的坑）：')
+      body.push(t.desc)
+    } else {
+      body.push('接续说明：库里这个任务没写说明 —— 动手前请先读上下文，顺手把说明补上。')
+    }
+    if (t.nextAct) {
+      body.push('')
+      body.push(`上一步留下的交代：${t.nextAct}`)
+    }
+    if (t.status === 'blocked' && unmetDeps(p, t).length) {
+      body.push('')
+      body.push('注意：这个任务当前被卡住，动手前先确认前置条件是否已经解开。')
+    }
+    body.push('')
+    body.push('执行要求：')
+    body.push(`  1) 先 project_context_pack(project="${p.key}", task_id="${t.key}") 读全上下文。`)
+    body.push(...mapRequirement(p))
+    body.push('  3) 收尾把结论自动写回库里：project_checkpoint + project_artifact_publish + project_task_update。')
+    body.push('  4) 哪些该你自己定、哪些该来问我，你自己判断 —— 但别让下个会话把同样的事再问一遍。')
+    return body.join('\n')
+  }
+
+  /* 项目层：项目现状简报（多任务项目卡）+ 单任务项目卡 */
+  const body: string[] = []
+  body.push(`【继续做 · ${p.name}】`)
+  if (p.scope) body.push(`项目：${p.scope}`)
+  body.push('')
+  body.push(`进度：${p.done}/${p.total} 已完成${p.ready ? ` · ${p.ready} 个待开始` : ''}${p.doing ? ` · ${p.doing} 个在做` : ''}`)
+  body.push('')
+  /* 按状态分组列出，让人一眼看出哪些能接、哪些被卡住 */
+  const group = (title: string, list: Task[]) => {
+    if (!list.length) return
+    body.push(`${title}：`)
+    for (const x of list) {
+      const dep = x.depends?.length ? `（等 ${x.depends.join('、')}）` : ''
+      const who = x.owner ? `（${x.owner}）` : ''
+      body.push(`  · ${x.key} —— ${x.title}${dep}${who}`)
+    }
+  }
+  group('还没人领', p.tasks.filter((x) => x.status === 'ready'))
+  group('正在做', p.tasks.filter((x) => x.status === 'doing'))
+  group('被卡住', p.tasks.filter((x) => x.status === 'blocked'))
+  group('已完成', p.tasks.filter((x) => x.status === 'done'))
+  body.push('')
+  body.push('要接着做，请先说清楚做哪个任务 —— 每个任务卡上都能单独复制接续块，')
+  body.push('里面带着那个任务的完整交接说明（含别人踩过的坑）。')
+  body.push('')
+  body.push('执行要求：')
+  body.push(`  1) 先 project_context_pack(project="${p.key}") 读全上下文。`)
+  body.push(...mapRequirement(p))
+  return body.join('\n')
+}
+
+/* 知识图谱（代码地图）读取要求。
+   用户 2026-09-15 明确要求：会话必须先读知识图谱 / 知识库结构，不能凭空开始。
+   库里的地图装在 agent_code_nodes / agent_code_edges，每个节点带职责说明和对应文件路径，
+   由 project_context_pack 一并返回；面板这里补一句显式要求，并按实际情况说清楚
+   （有图就说去读，没图就让人先建，别让人对着空气执行）。 */
+function mapRequirement(p: Proj): string[] {
+  const nodes = p.mapNodes || 0
+  const edges = p.mapEdges || 0
+  const line = `  2) 接着读知识图谱（代码地图）—— 弄清模块划分、各自职责、代码在哪个文件、模块之间怎么调。`
+  if (nodes > 0) {
+    return [
+      line,
+      `     project_context_pack 里就带着（本项目已记录 ${nodes} 个模块 / ${edges} 条调用关系），`,
+      `     也可以单独 project_code_map(project="${p.key}") 取完整版。`,
+      `     动手前先看它，别重读全仓库；改了代码的形状就用 project_code_map_write 更新回去。`,
+    ]
+  }
   return [
-    `【拆解 ${p.name}（project_key: ${p.key}）】`,
-    `这个项目还没有拆任务。`,
-    ``,
-    `请先 project_context_pack(project="${p.key}") 读上下文，然后把它规划成几个任务/模块：`,
-    `每个任务写清楚要交什么（验收标准），用 project_task_create 写进共享库。`,
-    `拆完告诉我拆成了哪几块，我自己找人做 —— 不要自己开子会话分派任务。`,
-  ].join('\n')
+    line,
+    `     但这个项目现在**还没有**代码地图（0 个模块）—— 读不到东西。`,
+    `     所以请顺手做一件事：读一遍代码后用 project_code_map_write 把地图建起来`,
+    `     （模块 / 职责 / 文件路径 / 调用关系），下个会话才不用重读全仓库。`,
+  ]
+}
+
+export function splitBlock(p: Proj): string {
+  const body: string[] = []
+  body.push(`【拆解 ${p.name}】`)
+  if (p.scope) body.push(`项目：${p.scope}`)
+  body.push('')
+  body.push('这个项目还没有拆任务。')
+  body.push('执行要求：')
+  body.push(`  1) 先 project_context_pack(project="${p.key}") 读上下文。`)
+  body.push(...mapRequirement(p))
+  body.push('  3) 把它规划成几个任务/模块：每个任务写清楚要交什么（验收标准），用 project_task_create 写进共享库。')
+  body.push('  4) 拆完告诉我拆成了哪几块，我自己找人做 —— 不要自己开子会话分派任务。')
+  return body.join('\n')
 }
 
 /* ============ ⑦ 数字缓停 ============ */
@@ -478,23 +866,31 @@ document.addEventListener('pointerdown', (e) => {
 /* ============ 视图 ============ */
 type View = { kind: 'projects' } | { kind: 'tasks'; proj: string }
 let view: View = { kind: 'projects' }
-let filter: 'all' | 'today' | 'ready' | 'doing' | 'done' = 'all'
 const folded = new Set<string>(GROUPS.filter((g) => g.folded).map((g) => g.title))
 
-const isToday = (ago: string) => /分钟|小时|刚刚/.test(ago)
-
-function matchesProj(p: Proj): boolean {
-  /* 筛选口径 = 状态徽章口径（同一个函数算），保证绝不出现"筛选说待开始、徽章说进行中" */
-  const st = projState(p).cls
-  if (filter === 'today') return isToday(p.ago)
-  if (filter === 'ready') return st === 'b-ready'
-  if (filter === 'doing') return st === 'b-doing'
-  if (filter === 'done') return st === 'b-done'
-  return true
+/* 项目列表顺序（用户定案 2026-09-15）：
+   进行中 → 待开始 → 被卡住 → 已完成 → 还没拆解
+   "按紧急程度，正在进行中在待开始上面，已完成去最下面"。
+   以前直接用后端返回的顺序（ORDER BY control_state, project_key = 按 key 字母序），
+   结果已完成的 codex-memory 排在在做的前面，完全不反映紧急度。
+   同一档里：待开始多的排前面（更有的干），再按项目名。 */
+function projUrgency(p: Proj): number {
+  if (p.total === 0) return 4          /* 还没拆解：等拆完才有活，排最后 */
+  if (doingOf(p) > 0) return 0         /* 进行中：最上面 */
+  if (readyOf(p) > 0) return 1         /* 有待开始 */
+  if (failedOf(p) > 0) return 2        /* 有失败的 */
+  return 3                             /* 全部完成：最下面 */
 }
+function sortProjects(items: Proj[]): Proj[] {
+  return [...items].sort((a, b) =>
+    (projUrgency(a) - projUrgency(b)) ||
+    (readyOf(b) - readyOf(a)) ||
+    a.name.localeCompare(b.name, 'zh'))
+}
+/* 筛选条已按用户要求去掉（2026-09-15）：不再按状态过滤，一律"把任务都列出来"，
+   顺序由 buildTaskList() 决定（正在做 → 待开始 → 被卡住 → 已完成）。 */
 
-function projCard(p: Proj): string {
-  const st = projState(p)
+export function projCard(p: Proj): string {  const st = projState(p)
   const { done, total } = prog(p)
   const pct = total ? Math.round((done / total) * 100) : 0
   const readyN = readyOf(p)
@@ -502,7 +898,7 @@ function projCard(p: Proj): string {
   const empty = total === 0
   const t0 = p.tasks[0]
   const meta = total === 0
-    ? `<span>未拆解 · 点击复制拆解指令</span>`
+    ? `<span>未拆解 · 先用「拆任务」把它拆开</span>`
     : single
       ? `<span class="meta-ready">${t0 ? taskLabel(t0).label : ''}</span><span>${p.ago}</span>`
       : `<span class="cells" title="${total} 个任务（已完成 ${done} / 进行中 ${inFlightOf(p)} / 待开始 ${readyN}）">${
@@ -519,7 +915,8 @@ function projCard(p: Proj): string {
       ${p.tags.length ? `<div class="tags">${p.tags.map((x) => `<span class="tag">${x}</span>`).join('')}</div>` : ''}
     </div>
     ${empty ? `<button class="card-copy always" data-split-proj="${p.key}"><svg class="ic"><use href="#i-split"/></svg>拆任务</button>` : ''}
-    ${single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>复制</button>` : ''}
+    ${single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>复制接续块</button>` : ''}
+    ${!empty && !single ? `<button class="card-copy always" data-copy-proj="${p.key}"><svg class="ic"><use href="#i-copy"/></svg>复制现状简报</button>` : ''}
   </div>`
 }
 
@@ -542,14 +939,13 @@ function taskCard(p: Proj, t: Task, i = 0): string {
 }
 
 function renderProjects() {
-  filtersEl.style.display = ''          /* 项目列表：显示筛选 */
   renderStats()
   let html = ''
   for (const g of GROUPS) {
-    const items = g.items.filter(matchesProj)
+    const items = sortProjects(g.items)      /* 紧急度：进行中 → 待开始 → 被卡住 → 已完成 → 未拆解 */
     if (!items.length) continue
     const isFolded = folded.has(g.title)
-    const readyN = items.reduce((n, p) => n + p.tasks.filter((t) => t.status === 'ready').length, 0)
+    const readyN = items.reduce((n, p) => n + readyOf(p), 0)
     html += `<div class="group-label ${g.folded !== undefined ? 'foldable' : ''} ${isFolded ? 'folded' : ''}" data-group="${g.title}">
       ${g.folded !== undefined ? '<svg class="ic ic-sm caret"><use href="#i-caret"/></svg>' : ''}${g.title}
       <span style="font-weight:500;opacity:.75">${items.length}${readyN ? ` · ${readyN} 待开始` : ''}</span></div>`
@@ -558,16 +954,26 @@ function renderProjects() {
   listEl.innerHTML = html
 }
 
+/* 任务列表顺序（用户定案 2026-09-15）：
+   正在做 → 待开始 → 被卡住 → 已完成
+   "正在进行中最上面，待开始下面，已完成去最下面"。同组内按 priority（数字小的优先=更紧急）。 */
+const TASK_ORDER: Record<TaskStatus, number> = { doing: 0, ready: 1, blocked: 2, done: 3 }
+const TASK_GROUP_TITLE: Record<TaskStatus, string> = {
+  doing: '正在做', ready: '待开始', blocked: '被卡住', done: '已完成',
+}
+const buildTaskList = (tasks: Task[]) =>
+  [...tasks].sort((a, b) => (TASK_ORDER[a.status] - TASK_ORDER[b.status]) || (a.pri - b.pri))
+
 function renderTasks(projKey: string) {
-  filtersEl.style.display = 'none'      /* 任务页：收起筛选，只留返回，把地方让给任务卡 */
   const p = byKey(projKey)
-  const order: Record<TaskStatus, number> = { ready: 0, doing: 1, blocked: 2, done: 3 }
-  const keep = (t: Task) =>
-    filter === 'ready' ? t.status === 'ready'
-    : filter === 'doing' ? t.status === 'doing'
-    : filter === 'done' ? t.status === 'done'
-    : true /* 全部 / 今日（任务无时间字段，今日等同全部） */
-  const list = p.tasks.filter(keep).sort((a, b) => (order[a.status] - order[b.status]) || (a.pri - b.pri))
+  const list = buildTaskList(p.tasks)
+  /* 按状态分段，段内保持上面的顺序 */
+  const segments: { status: TaskStatus; items: Task[] }[] = []
+  for (const t of list) {
+    const last = segments[segments.length - 1]
+    if (last && last.status === t.status) last.items.push(t)
+    else segments.push({ status: t.status, items: [t] })
+  }
   const { done, total } = prog(p)
   renderStats()
   const loading = !p.tasks.length && p.total > 0
@@ -580,8 +986,15 @@ function renderTasks(projKey: string) {
          <button class="btn btn-primary" data-split-proj="${p.key}"><svg class="ic"><use href="#i-split"/></svg>让 AI 拆任务</button>
        </div>`
     : list.length
-      ? `<div class="tlist">${list.map((t, i) => taskCard(p, t, i)).join('')}</div>`
-      : `<div class="empty"><div class="empty-t">这个筛选下没有任务</div><div class="empty-d">换个筛选看看，或者点「全部」</div></div>`
+      ? `<div class="tlist">${
+          segments.map((seg) =>
+            `<div class="tgroup"><span class="tgroup-t">${TASK_GROUP_TITLE[seg.status]}</span>` +
+            `<span class="tgroup-n">${seg.items.length}</span></div>` +
+            seg.items.map((t) => taskCard(p, t, list.indexOf(t))).join('')
+          ).join('')
+        }</div>`
+      : `<div class="empty"><div class="empty-t">这个项目没有任务</div><div class="empty-d">点「让 AI 拆任务」把它规划成几个任务写进共享库</div>
+         <button class="btn btn-primary" data-split-proj="${p.key}"><svg class="ic"><use href="#i-split"/></svg>让 AI 拆任务</button></div>`
   listEl.innerHTML = `
   <div class="detail">
     <button class="d-nav" data-back="1"><svg class="ic"><use href="#i-back"/></svg>全部项目</button>
@@ -607,7 +1020,7 @@ async function gotoTasks(key: string) {
   const card = listEl.querySelector(`[data-proj="${key}"]`) as HTMLElement | null
   const name = `vt-${key}`
   if (card) card.style.viewTransitionName = name
-  engine.setState('burst', clock)
+  setBotState('burst', clock)
   /* 先切过去：立刻有反应，不让你等接口 */
   await transition(() => {
     view = { kind: 'tasks', proj: key }
@@ -649,7 +1062,7 @@ listEl.addEventListener('click', async (e) => {
     folded.has(n) ? folded.delete(n) : folded.add(n)
     renderProjects(); return
   }
-  if (t.closest('[data-back]')) { await backToProjects(); engine.setState('wink', clock); return }
+  if (t.closest('[data-back]')) { await backToProjects(); setBotState('wink', clock); return }
 
   const splitP = t.closest('[data-split-proj]') as HTMLElement | null
   if (splitP) {
@@ -660,7 +1073,14 @@ listEl.addEventListener('click', async (e) => {
   const copyP = t.closest('[data-copy-proj]') as HTMLElement | null
   if (copyP) {
     const p = byKey((copyP as HTMLElement).dataset.copyProj!)
-    await copyText(projBlock(p, p.tasks[0]), `${p.name} · ${p.tasks[0]?.title ?? ''}`)
+    /* 单任务项目：卡上这一下要的就是那个任务的接续块。
+       多任务项目：要的是"项目现状简报"，所以不能把 tasks[0] 传进去
+       —— 传了就会变成复制第一个任务的接续块，跟按钮上写的不是一回事。 */
+    if (p.total === 1 && p.tasks[0]) {
+      await copyText(projBlock(p, p.tasks[0]), `${p.name} · ${p.tasks[0].title}`)
+    } else {
+      await copyText(projBlock(p), `${p.name} · 现状简报`)
+    }
     flash(copyP); return
   }
   const copyT = t.closest('[data-copy-task]') as HTMLElement | null
@@ -679,20 +1099,11 @@ listEl.addEventListener('click', async (e) => {
   }
 })
 
-filtersEl.addEventListener('click', async (e) => {
-  const chip = (e.target as HTMLElement).closest('.chip') as HTMLElement | null
-  if (!chip) return
-  filter = chip.dataset.filter as typeof filter
-  filtersEl.querySelectorAll('.chip').forEach((c) => c.classList.toggle('is-on', c === chip))
-  if (view.kind === 'projects') await transition(() => renderProjects())
-  else await transition(() => renderTasks(view.proj))
-})
-
 function flash(btn: HTMLElement) {
   btn.classList.add('done')
   const old = btn.innerHTML
   btn.innerHTML = '<svg class="tick" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>已复制'
-  engine.setState('burst', clock)   /* ④ 粒子绽放：球替你确认一下 */
+  setBotState('burst', clock)   /* ④ 粒子绽放：球替你确认一下 */
   setTimeout(() => { btn.classList.remove('done'); btn.innerHTML = old }, 1500)
 }
 
