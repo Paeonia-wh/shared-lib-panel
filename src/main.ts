@@ -1103,6 +1103,13 @@ export function projBlock(p: Proj, t?: Task): string {
          已 done 的任务只能从 overview 里找，不能再走派发。 */
       body.push(`想拿完整上下文：project_overview(project="${p.key}") 看它这一项`)
       body.push('  （已 done 的任务不能再 dispatch —— 会回 already done）；也可以直接读它历史上的检查点。')
+      /* 补一句"标了 done 也能补写代码地图"（2026-09-16 补）。
+         为什么：代码地图的门禁是"你在本项目里干过"（拥有任务 / 近 7 天有检查点），
+         **不看任务是不是 done** —— 但这里没写，会话会以为"做完了就不能补地图了"，
+         于是架构图一直缺一块。这个口径在 discipline() 里提过，但那段在 isDone 分支里
+         **走不到**（本分支提前 return 了），所以必须单独写。 */
+      body.push('另外：**代码地图标了 done 也能补写** —— 门禁看的是"你在本项目里干过"')
+      body.push('  （拥有任务 / 近 7 天有检查点），不看任务是否已完成。发现上面那张图缺了就补。')
       return body.join('\n')
     }
 
@@ -1280,6 +1287,15 @@ function discipline(): string[] {
   return [
     '',
     '  几条纪律：',
+    '    · ★★ **没做完的任务，绝对不要标 done。** 这是最容易犯、后果最重的一条：',
+    '      标了 done，面板会说这件事完了、下一个会话以为不用再管、对账时拿不到东西 ——',
+    '      而且平台**禁止把 done 直接改回 running**（理由 Self-approval），改回来还得走：',
+    '        project_task_reopen(task_id=<id>, session_id=<你>, reason="标早了，实际没做完")',
+    '      所以动手之前先想清楚：**这活真做完了吗？** 没做完就留着，状态按实际选：',
+    '        · 还要接着做       → 留 pending',
+    '        · 卡在外部原因     → status="blocked"',
+    '        · 干完了等别人验   → status="review"',
+    '      宁可少标一个 done，也不要把没做完的标成完成。',
     '    · 任何工具报错，把**报错原文**照贴回来（含工具名和完整 message），不要自己改述、不要假装成功。',
     '    · 顺序最关键：**先领任务 → 动手 → 更新代码地图 → 检查点/产出 → 最后才标 done**。',
     '      先标 done 会导致：**发不出产出**（artifact_publish 要求任务在你名下，且它必须是活跃任务）。',
@@ -1367,10 +1383,25 @@ export function splitBlock(p: Proj): string {
   body.push('  3) 先判断这个项目**要不要**拆任务：')
   body.push('     · 要写代码/要做功能 → 拆成若干任务，每个写清"要交什么"（验收标准）。')
   body.push('     · 纯资料/纯记录类 → 不用拆，把资料结构和来源整理进知识图谱就行，别硬造任务。')
-  body.push('  4) **建之前先查重**：project_overview 看一眼已有任务，别和现有的重了 ——')
+  body.push('  4) **建卡之前先回答一个问题：这块活本来该不该建卡？**（这一步最容易把库搞乱）')
+  body.push('     · 这块活**还在某个已有任务的合同范围内**（acceptance / constraints 里就写着）')
+  body.push('       → **别建新卡**，去那个任务里补一个检查点就够了。')
+  body.push('         建了会变成"两张卡说同一件事"，对账时判不清谁该负责。')
+  body.push('     · 合同里**没有**的、执行中新发现的活 → 这才是该建卡的情况。')
+  body.push('     · 拿不准就问用户，别自己定（这一步判错会留下长期烂账）。')
+  body.push('  5) 建卡时先查重：project_overview 看一眼已有任务，别和现有的重了 ——')
   body.push('     同一个 key 建第二次会直接报 Task already exists；但换个 key 建同一件事不会报，')
   body.push('     只会让库里多一张重复卡（本会话就干过一次，靠事后核对才发现）。')
-  body.push('  5) 要拆的话，注意建任务这条路分两种情况（先确认是哪一种，别撞墙）：')
+  body.push('     ⚠ 还有一条：**平台不允许改任务名 / 说明**（project_task_update 只改 status / next_action）。')
+  body.push('       所以"范围变了"要靠**更新合同**或拆新卡解决，不要指望改名。')
+  body.push('  6) ★ **建完卡之后，没做完的卡绝对不要标 done**：')
+  body.push('        · 做完了 → status="done"（标之前先 project_preflight 验判据）')
+  body.push('        · 还要接着做 → 留 pending（它本来就是 pending，什么都不用改）')
+  body.push('        · 卡在外部原因 → status="blocked"')
+  body.push('        · 干完了等别人验 → status="review"')
+  body.push('      标错代价很大：面板会说这件事完了、下个会话以为不用管，')
+  body.push('      而且平台禁止 done→running（要改回来必须走 project_task_reopen）。')
+  body.push('  7) 要拆的话，注意建任务这条路分两种情况（先确认是哪一种，别撞墙）：')
   body.push(`     · 先 project_session_register(project="${p.key}", provider="<你的 provider>", model="<你的 model>") 登记自己；`)
   body.push('       没登记的话后面所有写操作都会因为"会话不在这个项目里"而失败。')
   body.push('     · 项目计划没锁 → 直接用 project_task_create(project=…, task_key=…, title=…, description=…, priority=…)。')
@@ -1380,7 +1411,7 @@ export function splitBlock(p: Proj): string {
   body.push('       规则是「提议者不能审自己的提案」—— 也就是说你需要另一个会话（或用户）来批；')
   body.push('       project_plan_review 这个工具本身是可用的（已实测）。')
   body.push('       **批完之后计划会解锁**，之后就能直接 project_task_create 建任务，不用每次都走提案。')
-  body.push('  6) 拆完把结果告诉我：拆成了哪几块。**不要自己开子会话分派任务** —— 我自己找人做。')
+  body.push('  8) 拆完把结果告诉我：拆成了哪几块。**不要自己开子会话分派任务** —— 我自己找人做。')
   body.push(...discipline())
   return body.join('\n')
 }
