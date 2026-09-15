@@ -277,7 +277,14 @@ fn spawn_watchdog() {
                 use std::os::windows::process::CommandExt;
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 Command::new("powershell")
-                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script])
+                    /* ⚠ 必须带 -EnsureRunning（只起不停）。
+                       第一版没带 —— 看门狗在"端口被占但查询失败"时会走脚本的
+                       破坏性分支：**把它停掉再起**。而用户发现这台机器上
+                       不止一方在动同一个数据目录（另一个会话也在搞这套库），
+                       两边互相打断 → 最后 55440 上一个 postmaster 都没有，
+                       服务持续宕机约 20 分钟。
+                       -EnsureRunning 的语义：只把"没有的"补上，永不"把有的拆掉"。 */
+                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-EnsureRunning"])
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn()
             };
