@@ -1525,6 +1525,39 @@ function contractGaps(raw: string | undefined): { hasGoal: boolean; mechanical: 
   }
 }
 
+/* 动手前的门 —— 抽成函数，方便放在**块的最前面**（2026-09-17 调整）。
+   ⚠ 为什么从"合同中段"提到"抬头下面"（用户提的）：
+   放在合同后面，接手会话得先读完合同才看到它 —— 而它的意思是"**先别动手**"，
+   这种话必须第一眼就看见，否则会话已经边读边开工了。
+   原则：**拦人的话放最前面，背景信息放后面。** */
+function preWorkGate(t: Task, isDone: boolean): string[] {
+  if (isDone) return []
+  const gap = contractGaps(t.contract)
+  if (gap.hasGoal && gap.mechanical > 0) return []          /* 要求清楚，不拦 */
+  const out: string[] = []
+  out.push('━'.repeat(30))
+  if (!gap.hasGoal && gap.mechanical === 0) {
+    out.push('⚠ **先别动手 —— 这个任务的要求还没定清楚。**')
+    out.push('  现在合同里既没有"目标"，也没有一条可判定的验收判据。')
+    out.push('  你要做的第一件事是**跟用户把这两样问清楚**：')
+    out.push('    · 这件事做成什么样算完？（一句话的目标）')
+    out.push('    · 拿什么证明它完了？（最好是机器能查的：file_exists:<路径> / tests_pass:<命令>）')
+    out.push('  定下来之后：用 project_task_contract 把合同补上，再开工。')
+    out.push('  ⚠ 别自己编一个标准就闷头做 —— 那等于把"做完了"的定义交给你自己，')
+    out.push('    后面没人能验收（对账时会变成"读一遍说通过"）。')
+  } else {
+    out.push('⚠ **动手前先确认验收标准**：合同里有目标，但**没有一条机器能查的判据**。')
+    out.push('  现在的验收只能靠人读一遍 —— 而"读一遍"最容易漏。')
+    out.push('  · 这件事**本来就能机器验**（文件在不在、测试过不过）→ 先问用户能不能加一条，')
+    out.push('    然后用 project_task_contract 补上（形如 file_exists:<路径> / tests_pass:<命令>）。')
+    out.push('  · 确实只能人看（设计稿、文案）→ 那就是这样，继续做；')
+    out.push('    但收尾时把"人该看什么"写进检查点，别只说"做完了"。')
+  }
+  out.push('━'.repeat(30))
+  out.push('')
+  return out
+}
+
 export function projBlock(p: Proj, t?: Task): string {
   const info = projInfo(p)
 
@@ -1549,6 +1582,9 @@ export function projBlock(p: Proj, t?: Task): string {
     body.push(isDone ? `【已完成 · ${p.name} / ${t.key}】`
       : isReview ? `【待验收 · ${p.name} / ${t.key}】`
       : `【继续做 · ${p.name} / ${t.key}】`)
+    /* ★ 门放在抬头下面第一件事（2026-09-17 调整，原来在合同后面）。
+       理由见 preWorkGate 的注释：拦人的话必须第一眼看见。 */
+    body.push(...preWorkGate(t, isDone))
     body.push(...info)
     body.push('')
     body.push(`任务：${t.title}`)
@@ -1598,35 +1634,7 @@ export function projBlock(p: Proj, t?: Task): string {
       body.push(`上一步留下的交代：${t.nextAct}`)
     }
 
-    /* ★ 动手前的门（2026-09-17 加，用户要求："让会话不能直接动手，得先问清楚了"）。
-       为什么用"合同够不够"当判据、而不是写一句空的"请先确认需求"：
-       空话没人会照做；而"有没有可判定的验收判据"是**能查的事实** ——
-       实测平台自己的注释里就写着「51 个有合同的任务里，含可判定判据的 = 0 个」。
-       判据缺失不只是"不够严谨"，它有两个具体后果：
-         · 会话不知道做到什么算完 → 会自己编一个标准
-         · 对账时平台跑不了判据 → 只能"读一遍说通过"
-       所以这一档明确要求：**先跟用户把验收标准定下来，再动手。** */
-    if (!isDone) {
-      const gap = contractGaps(t.contract)
-      body.push('')
-      if (!gap.hasGoal && gap.mechanical === 0) {
-        body.push('⚠ **先别动手 —— 这个任务的要求还没定清楚。**')
-        body.push('  现在合同里既没有"目标"，也没有一条可判定的验收判据。')
-        body.push('  你要做的第一件事是**跟用户把这两样问清楚**：')
-        body.push('    · 这件事做成什么样算完？（一句话的目标）')
-        body.push('    · 拿什么证明它完了？（最好是机器能查的，比如 file_exists:<路径> / tests_pass:<命令>）')
-        body.push('  定下来之后：用 project_task_contract 把合同补上，再开工。')
-        body.push('  ⚠ 别自己编一个标准就闷头做 —— 那等于把"做完了"的定义交给你自己，')
-        body.push('    后面没人能验收（对账时会变成"读一遍说通过"）。')
-      } else if (gap.mechanical === 0) {
-        body.push('⚠ **动手前先确认验收标准**：合同里有目标，但**没有一条机器能查的判据**。')
-        body.push('  现在的验收只能靠人读一遍 —— 而"读一遍"最容易漏。')
-        body.push('  · 如果这件事**本来就能机器验**（文件在不在、测试过不过）→ 先问用户能不能加一条')
-        body.push('    （形如 file_exists:<路径> / tests_pass:<命令>），然后用 project_task_contract 补上。')
-        body.push('  · 如果确实只能人看（设计稿、文案）→ 那就是这样，继续做，')
-        body.push('    但收尾时把"人该看什么"写进检查点，别只说"做完了"。')
-      }
-    }
+    /* ⚠ 那段"先别动手"的门已经挪到抬头下面（见 preWorkGate）—— 这里不再重复。 */
 
     /* blocked 要分开说（2026-09-15 修）。
        原来只在"有未完成前置"时才提醒，于是"等客户/等资质"那类 blocked
@@ -2007,6 +2015,35 @@ function mapRequirement(p: Proj, num = '2'): string[] {
   ]
 }
 
+/* ⚠ 2026-09-17 加（用户提的真问题）：
+   **已标 done 的任务，未必真做完了。**
+   场景：一个会话干到一半、上下文满了/换了个会话，前一个会话为了方便收口
+   可能已经把卡标了 done；下一个人接手时看到的"已完成"其实是假的。
+   用户的原话："有点任务其实没完成但是换会话了，此时用沉淀那个复制他建的卡就是已完成的"
+   后果很具体：**新会话照着"已完成"继续往上垒卡，把一个假的完成当既成事实。**
+
+   所以建卡前要把可疑的 done 列出来问用户。判据用**库里真实存在的信号**，
+   不瞎猜：
+     · 有合同判据、但从来没跑过 → 这个 done 是"人说的"，不是"验过的"
+     · 从来没检查点           → 连过程记录都没有，更像随手标的
+   两个信号取其一 = 可疑。这是**提示用户去确认**，不是判定它错。 */
+function suspiciousDone(p: Proj): { key: string; title: string; why: string }[] {
+  const out: { key: string; title: string; why: string }[] = []
+  for (const t of p.tasks) {
+    if (t.status !== 'done') continue
+    const c = parseContract(t.contract || '')
+    const hasPredicate = c.acceptance.some((a) => PREDICATE_RE.test(a.trim()))
+    /* 只有合同里有可判定判据时，"没跑过"才算可疑 ——
+       纯人看的活（设计稿、文案）本来就没有机器判据，不能因此怀疑它。 */
+    if (hasPredicate) {
+      out.push({ key: t.key, title: t.title, why: '合同里有可查验的判据，但库里没有跑过判据的记录' })
+    } else if ((p.checkpoints ?? 0) === 0) {
+      out.push({ key: t.key, title: t.title, why: '这个项目一条检查点都没有，看不出它怎么完成的' })
+    }
+  }
+  return out
+}
+
 export function splitBlock(p: Proj): string {
   const body: string[] = []
   const hasTasks = p.total > 0
@@ -2019,18 +2056,56 @@ export function splitBlock(p: Proj): string {
   body.push(hasTasks
     ? `这个项目现在有 ${p.total} 个任务（已完成 ${p.done}）。你要往里**加新任务**。`
     : '这个项目一个任务都还没有。你要把它**拆成任务**。')
+
+  /* ★ 建卡前先跟用户核对状态（2026-09-17 加，用户提的真问题）。
+     为什么要放在**最前面**（原来只在末尾轻描淡写一句"想拆得跟用户对齐"）：
+     库里标 done 的卡**未必真做完** —— 换会话时前一个会话可能为了方便就收口了。
+     而新会话会把这些"已完成"当成既成事实往上垒，**一步错、后面全歪**。
+     所以：先把可疑的列出来问清，再谈建卡。 */
   body.push('')
-  body.push('★ 做法在这份说明里（含"先判断该不该建卡""计划锁着怎么走提案"等完整步骤）：')
-  body.push('     D:\\codex-memory\\docs\\加新任务.md')
+  body.push('━'.repeat(30))
+  body.push('⚠ **动手之前，先跟用户确认那些"已完成"的卡是真做完了。**')
   body.push('')
-  body.push('  ⚠ 几个容易踩的先提醒（细节在文档里）：')
-  body.push('     · ★ **先判断这块活该不该建卡** —— 还在已有任务合同范围内的，别建新卡。')
-  body.push('     · ★ **先确认计划锁没锁**：没锁直接 project_task_create；')
-  body.push('       锁着只能 project_plan_propose 提案，且**要另一个会话来批**（不能自批）。')
-  body.push('     · 建卡时把**验收标准写成判据**（file_exists: / tests_pass: … 写具体路径/命令）。')
-  body.push('     · 建完之后：**没做完的卡绝对不要标 done**。')
+  body.push('  原因：库里标 `done` 是**上一个会话说的**，不是平台验的。')
+  body.push('  换会话的时候很容易出现"为了收口就标了 done、其实活还差一点" ——')
+  body.push('  如果你拿这个假的完成当既成事实往上建新卡，**后面全歪**。')
+  const susp = suspiciousDone(p)
+  if (susp.length) {
+    body.push('')
+    body.push(`  库里这几张 done 卡**看着可疑**（不是判定它们错，是请你问一下）：`)
+    for (const s of susp) body.push(`    · ${s.key} —— ${s.title}（${s.why}）`)
+  } else {
+    body.push('  （我按"有判据没跑过 / 从无检查点"扫了一遍，没扫出可疑的 ——')
+    body.push('    但这只说明**库里没留下反证**，不等于一定做完了。）')
+  }
   body.push('')
-  body.push('  想拆得跟用户对齐再落卡：先把方案给他看，他确认了再建。')
+  /* 要问的话**给现成的**：会话照着念就行，不用自己组织语言。
+     这也是"先问用户"能真正落地的关键 —— 只写"请先确认"没人知道该怎么问。 */
+  body.push('  请照这样问用户（**原话照念即可**）：')
+  body.push('    「建新卡之前我想先确认一下：这几张标着"已完成"的卡，')
+  body.push('      您认为它们真的做完了吗？还是当时只是为了收口先标上的？')
+  body.push('      如果有没做完的，请告诉我哪几张、还差什么 ——')
+  body.push('      我会用 project_task_reopen 把它们退回队列，再往下拆。」')
+  body.push('')
+  body.push('  ⚠ 用户没答之前**不要建任何新卡**，也不要改那几张卡的状态。')
+  body.push('  ⚠ 如果用户说"都是真做完的"—— 那就继续；**把他这句话记进检查点**')
+  body.push('    （这是"完成状态经过人确认"的证据，下次换会话就不会再被怀疑）。')
+  body.push('━'.repeat(30))
+  body.push('')
+  body.push('★ 用户确认之后，怎么做（**这里就说全了**）：')
+  body.push('  ① **先判断这块活该不该建卡** —— 还在已有任务合同范围内的，别建新卡，')
+  body.push('     那是往老卡里补活，不是新卡。')
+  body.push('  ② **先确认计划锁没锁**：')
+  body.push('     · 没锁 → 直接 project_task_create(project=…, task_key=…, title=…, …)')
+  body.push('     · 锁着 → 只能 project_plan_propose 提案，而且**要另一个会话来批**（不能自批）')
+  body.push('  ③ 建卡时把**验收标准写成判据**，写具体路径/命令，别写空话：')
+  body.push('       file_exists:src/xxx.ts  ·  tests_pass:npm test  ·  grep_present:<文件>:<关键字>')
+  body.push('  ④ 建完之后：**没做完的卡绝对不要标 done**（这就是上面那个坑的来源）。')
+  body.push('')
+  body.push('  ⚠ 拆之前先把方案给用户看、他点头了再落卡 —— 别自己把任务定完。')
+  body.push('')
+  body.push('  （想更细的：D:\\codex-memory\\docs\\加新任务.md —— 完整流程、提案/审批的边界。')
+  body.push('    那是标准安装位置；**打不开就忽略它，不影响你按上面做**。）')
   body.push(...discipline())
   return body.join('\n')
 }
