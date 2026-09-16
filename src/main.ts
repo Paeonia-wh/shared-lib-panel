@@ -1739,8 +1739,8 @@ export function projBlock(p: Proj, t?: Task): string {
        或者改过安装位置。主干挂在外部文件上，接手会话读不到就卡住。
        现在：块自己把该做的说完了（上面那几条），文档只是"想更细再看"。 */
     body.push('')
-    body.push('  （想更细的：D:\\codex-memory\\docs\\接手任务.md —— 完整流程、判据写法、各种边界。')
-    body.push('    那是标准安装位置；**打不开就忽略它，不影响你按上面做**。）')
+    body.push('  （想更细的：仓库里的 docs\\接手任务.md —— 完整流程、判据写法、各种边界。')
+    body.push('    ⚠ 那个路径**在你机器上不一定存在**；打不开就忽略，上面这些已经够你开工。）')
 
     return body.join('\n')
   }
@@ -1961,7 +1961,12 @@ function discipline(): string[] {
   return [
     '',
     '  ⚠ 干活和收尾的纪律（★ 不许标假 done / 检查点五项 / 中断前冻现场 / 记设计决策…）：',
-    '     见 D:\\codex-memory\\docs\\干活纪律.md —— **动手之前先读它**。',
+    /* ⚠ 2026-09-17 改：原来写「见 D:\codex-memory\docs\干活纪律.md —— **动手之前先读它**」。
+       两个毛病：① 那是我这台机器的绝对路径，别人（数万个用户）那儿大概率不存在；
+       ② 「先读它」是**命令式**的 —— 会话会去读一个不存在的文件然后卡住。
+       改成"如果存在就看"，并且**上面的纪律本身已经说完了**，文档只是更详细的版本。 */
+    '     上面这些就是要点。想更细的看仓库里的 docs\\干活纪律.md ——',
+    '     **那个路径在你机器上不一定存在，打不开就忽略它**，别为它停下。',
   ]
 }
 
@@ -2104,8 +2109,8 @@ export function splitBlock(p: Proj): string {
   body.push('')
   body.push('  ⚠ 拆之前先把方案给用户看、他点头了再落卡 —— 别自己把任务定完。')
   body.push('')
-  body.push('  （想更细的：D:\\codex-memory\\docs\\加新任务.md —— 完整流程、提案/审批的边界。')
-  body.push('    那是标准安装位置；**打不开就忽略它，不影响你按上面做**。）')
+  body.push('  （想更细的：仓库里的 docs\\加新任务.md —— 完整流程、提案/审批的边界。')
+  body.push('    ⚠ 那个路径**在你机器上不一定存在**；打不开就忽略，上面这些已经够你建卡。）')
   body.push(...discipline())
   return body.join('\n')
 }
@@ -2491,10 +2496,9 @@ async function copyText(text: string, what: string) {
 export const LIBRARY_RECORD_REQUIREMENT = [
   `【记录进共享库】`,
   ``,
-  `  你干完活了，要把结果写回库。**做法在这份说明里**（完整步骤，照它做就行）：`,
-  `     D:\\codex-memory\\docs\\记录进库.md`,
+  `  你干完活了，要把结果写回库。**下面三步就是全部做法，照着做即可**：`,
   ``,
-  `  ⚠ 三件最要紧的先说（全文在文档里）：`,
+  `  ⚠ 三件最要紧的（**下面就说全了，不用另找文档**）：`,
   `     1. ★ **没做完的任务，绝对不要标 done。** 标了 done，面板会说这件事完了、`,
   `        下个会话以为不用再管、对账时拿不到东西；而且平台禁止 done 直接改回 running，`,
   `        要改回来只能走 project_task_reopen(task_id=<id>, session_id=<你>, reason=…)`,
@@ -2504,7 +2508,8 @@ export const LIBRARY_RECORD_REQUIREMENT = [
   `        唯一通道（面板不显示检查点，不写就等于丢了）。`,
   ``,
   `  收尾顺序（写反了会把自己锁死）：检查点五项 → 发产出 → preflight 验判据 → 标 done。`,
-  `  通用纪律（含"标错了怎么改回来"）见 D:\\codex-memory\\docs\\干活纪律.md。`,
+  `  通用纪律（含"标错了怎么改回来"）见仓库里的 docs\\干活纪律.md。`,
+  `  ⚠ 那个路径**在你机器上不一定存在** —— 打不开就忽略，上面这些已经够你把今天的活记完。`,
 ].join('\n')
 
 /* ============ 开一个新项目（右上角按钮复制的就是它）============
@@ -2532,10 +2537,10 @@ export const NEW_PROJECT_START = [
   `  没有目录、没有代码、没有任务，用户手上也许只有一个想法或一份文档。**这都正常。**`,
   ``,
   `★ 0) 先读这份说明（它是专门为这个场景写的，读完你就知道怎么做）：`,
-  `     D:\\codex-memory\\docs\\怎么开新项目.md`,
+  `     仓库里的 docs\\怎么开新项目.md`,
   `     里面讲了：这个库是什么 / 用户可能让你做什么 / 从零建项目的完整步骤 /`,
   `     建完该做哪三件事 / 什么时候**不该**建任何东西 / 几条边界。`,
-  `     （更通用的机制在 D:\\codex-memory\\README.md 的「一、给 AI 会话看的」。）`,
+  `     ⚠ **路径对不上就直接问用户"仓库和文档在哪" —— 别猜、也别为它停下。**`,
   ``,
   `★ 1) ★★ **然后问用户要干什么 —— 别自己挑一个就开始做。**`,
   `     用户可能说：只是聊聊 / 分析一下 / 把这事拆成任务 / 从零做 XX / 看看库里有什么。`,
@@ -3241,7 +3246,12 @@ async function exportProjectPdf(projKey: string, btn?: HTMLElement | null): Prom
     /* ③ 拼 HTML */
     const html = buildReportHtml(p, ckRows)
     /* ④ 交给 Rust：写文件 + Edge 打 PDF */
-    const dir = 'D:\\codex-memory\\vault\\exports\\' + projKey
+    /* ⚠ 2026-09-17 改：原来写死 `D:\codex-memory\vault\exports\` —— 那是我开发机的目录。
+       别人的机器上这个目录不存在（`export_pdf` 会 create_dir_all 建出来，
+       但仍然是在一个莫名其妙的路径下造目录）—— 用户会找不到导出的 PDF。
+       改成"用户文档目录下的子文件夹"，这是任何 Windows 上都存在、且用户认识的地方。
+       想改：设环境变量 PANEL_EXPORT_DIR。 */
+    const dir = await invoke<string>('resolve_export_dir', { projKey })
     const stamp = today().replace(/[: ]/g, '-')
     const filename = `${safeName(p.name)}-进度-${stamp}`
     const pdf = await invoke<string>('export_pdf', { html, dir, filename })

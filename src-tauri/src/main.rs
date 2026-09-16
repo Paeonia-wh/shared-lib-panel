@@ -73,10 +73,32 @@ fn shared_token() -> Result<String, String> {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
 
-    let py = r"D:\codex-memory\runtime\venv\Scripts\python.exe";
-    let code = "import sys; sys.path.insert(0, r'D:\\codex-memory\\repo\\src'); \
-from codex_memory.config import Settings; from codex_memory.security import protect; \
-print(protect((Settings.load().root / 'data/service-token.dpapi').read_bytes(), decrypt=True).decode())";
+    /* ⚠ 2026-09-17 改：这两个路径原来**写死在代码里**，是取服务 token 用的。
+       别人（用户说有数万人会用）装到别处时，这两个路径都不存在 →
+       取 token 失败 → **面板能连库，但共享工具全用不了**，而且报错只说"token 失败"，
+       看不出是路径问题。改成环境变量可覆盖 + 报错里带上实际找的路径。
+
+       优先级：
+         PANEL_PYTHON      python.exe 的完整路径
+         PANEL_REPO_SRC    codex-memory 的 src 目录（含 codex_memory 包的那个）
+       默认值保持兼容（开发机的标准安装）。 */
+    let home = std::env::var("CODEX_MEMORY_HOME").unwrap_or_else(|_| r"D:\codex-memory".to_string());
+    let py = std::env::var("PANEL_PYTHON").ok().filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| format!(r"{home}\runtime\venv\Scripts\python.exe"));
+    let repo_src = std::env::var("PANEL_REPO_SRC").ok().filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| format!(r"{home}\repo\src"));
+    if !std::path::Path::new(&py).exists() {
+        return Err(format!(
+            "找不到 Python：{py}\n\
+             这是面板读服务 token 用的解释器。请设环境变量 PANEL_PYTHON 指向你的 \
+             venv\\Scripts\\python.exe（或设 CODEX_MEMORY_HOME 指向库的根目录）。"
+        ));
+    }
+    let code = format!(
+        "import sys; sys.path.insert(0, r'{repo_src}'); \
+         from codex_memory.config import Settings; from codex_memory.security import protect; \
+         print(protect((Settings.load().root / 'data/service-token.dpapi').read_bytes(), decrypt=True).decode())"
+    );
 
     let mut cmd = Command::new(py);
     cmd.arg("-c").arg(code);
@@ -168,12 +190,42 @@ async fn start_event_stream(app: tauri::AppHandle) -> Result<(), String> {
 
 
 /// 带超时的 PG 连接（默认连接串没超时，会永久挂住）
+///
+/// ⚠ 2026-09-17 改：原来 host/port/user/dbname **全写死**（127.0.0.1:55440）。
+/// 那是开发机的默认安装 —— 但别人（尤其是改过端口、或库不在这台机器上的人）
+/// 打开面板只会看到一片空，**而且不会知道是连不上**。
+/// 现在支持环境变量覆盖，默认值保持兼容：
+///   PANEL_PG_HOST / PANEL_PG_PORT / PANEL_PG_USER / PANEL_PG_DB / PANEL_PG_PASSWORD
+/// 也可以一步到位给整串：PANEL_PG_DSN="host=… port=… user=… dbname=…"
 fn pg_connect() -> Result<postgres::Client, String> {
     use std::time::Duration;
     let mut cfg = postgres::Config::new();
-    cfg.host("127.0.0.1").port(55440).user("codex_memory").dbname("codex_memory");
+    /* 整串优先：给了 DSN 就用它，其余变量忽略 */
+    if let Ok(dsn) = std::env::var("PANEL_PG_DSN") {
+        let dsn = dsn.trim().to_string();
+        if !dsn.is_empty() {
+            cfg = dsn.parse::<postgres::Config>()
+                .map_err(|e| format!("PANEL_PG_DSN 解析失败: {e}"))?;
+            cfg.connect_timeout(Duration::from_secs(5));
+            return cfg.connect(postgres::NoTls)
+                .map_err(|e| format!("PG连接失败（用 PANEL_PG_DSN）: {e}"));
+        }
+    }
+    let env_or = |k: &str, d: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| d.to_string());
+    let host = env_or("PANEL_PG_HOST", "127.0.0.1");
+    let port: u16 = env_or("PANEL_PG_PORT", "55440").parse()
+        .map_err(|_| "PANEL_PG_PORT 不是合法端口号".to_string())?;
+    let user = env_or("PANEL_PG_USER", "codex_memory");
+    let db = env_or("PANEL_PG_DB", "codex_memory");
+    cfg.host(&host).port(port).user(&user).dbname(&db);
+    if let Some(pw) = std::env::var("PANEL_PG_PASSWORD").ok().filter(|v| !v.is_empty()) {
+        cfg.password(&pw);
+    }
     cfg.connect_timeout(Duration::from_secs(5));
-    cfg.connect(postgres::NoTls).map_err(|e| format!("PG连接失败: {e}"))
+    cfg.connect(postgres::NoTls).map_err(|e| {
+        /* 报错里带上实际用的地址 —— 否则用户只知道"失败了"，不知道它在连哪儿 */
+        format!("PG连接失败（{user}@{host}:{port}/{db}）: {e}")
+    })
 }
 
 /* ==================================================================
@@ -703,6 +755,32 @@ async fn qcheckpoints(project_key: String) -> Result<String, String> {
 /// （Word 那条路实测不行：Word COM 调用会卡死，所以不做 .docx。）
 /// 返回 PDF 的绝对路径。
 #[tauri::command]
+/// 决定导出目录（**不写死在代码里**，2026-09-17 加）。
+///
+/// 为什么需要这个命令：原来前端直接写 `D:\codex-memory\vault\exports\<项目>` ——
+/// 那是开发机的路径。别人装到别处/别的机器上，导出的 PDF 会落在一个
+/// 他不认识也找不到的地方（虽然 export_pdf 会自动建目录，不会报错，但更难发现）。
+///
+/// 优先级：环境变量 PANEL_EXPORT_DIR > 用户文档目录\共享项目库-导出\<项目>
+fn resolve_export_dir(proj_key: String) -> Result<String, String> {
+    if let Ok(dir) = std::env::var("PANEL_EXPORT_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return Ok(std::path::Path::new(dir).join(&proj_key).to_string_lossy().to_string());
+        }
+    }
+    let home = std::env::var("USERPROFILE")
+        .map_err(|_| "读不到 USERPROFILE，无法决定导出目录；可以设 PANEL_EXPORT_DIR".to_string())?;
+    /* 用中文目录名：用户在"文档"里一眼能认出这是这个软件建的 */
+    Ok(std::path::Path::new(&home)
+        .join("Documents")
+        .join("共享项目库-导出")
+        .join(&proj_key)
+        .to_string_lossy()
+        .to_string())
+}
+
+#[tauri::command]
 async fn export_pdf(html: String, dir: String, filename: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         use std::process::Command;
@@ -831,7 +909,7 @@ fn main() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--silent"]),
         ))
-        .invoke_handler(tauri::generate_handler![qdata, qtasks, qcheckpoints, export_pdf, open_file, move_window, set_click_through, debug_log, call_shared_tool, events_url, start_event_stream])
+        .invoke_handler(tauri::generate_handler![qdata, qtasks, qcheckpoints, export_pdf, resolve_export_dir, open_file, move_window, set_click_through, debug_log, call_shared_tool, events_url, start_event_stream])
         .setup(|app| {
             /* 看门狗：数据库/服务掉了自动拉回来（见 spawn_watchdog 的说明）。
                放在这里是因为 setup 时窗口已经起来了、面板已经常驻 ——
