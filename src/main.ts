@@ -1152,35 +1152,22 @@ export function projBlock(p: Proj, t?: Task): string {
     }
 
     body.push('')
-    body.push('执行要求（顺序别换 —— 换错一步会把自己锁死，见第 4 条）：')
-    body.push(`  1) 先登记并领任务，拿到它的 id（注意：**id 不是下面这个 key**，是库里 32 位 uuid）：`)
-    body.push(`     project_task_dispatch(project="${p.key}", task_key="${t.key}")   ← 返回里找 id`)
-    body.push(`     不领就直接干的话，你发不了产出、最后也标不了完成（那两件事都要求"任务在你名下"）。`)
-    body.push(`  2) 用那个 id 读上下文：project_context_pack(project="${p.key}", task_id="<上一步的 id>")`)
-    body.push('     验收标准以里面的 Objective / Acceptance 为准；这两个是空的就自己写出验收标准并回写。')
-    body.push(...mapRequirement(p, '3'))
-    body.push('  4) 干活。**收尾顺序也不能换**：')
-    body.push('     ⚠ 写合同时，验收标准尽量写成**可判定的判据** —— 对账时会被自动执行并取证：')
-    body.push('       file_exists:<路径>              存在、是文件、非空')
-    body.push('       no_placeholders:<路径>          没有 TODO/TBD/FIXME/[INSERT]/待实现')
-    body.push('       grep_absent:<路径>::<文本>      搜不到那段文本')
-    body.push('       sha256:<路径>::<摘要>           内容指纹一致')
-    body.push('       tests_pass:<测试命令>           测试通过（需你实际跑，结果作为 evidence 传）')
-    body.push('       自然语言照旧可以写 —— 不会被拒，只是不会被自动验（由复核会话读）')
-    body.push('     a. project_checkpoint(project=…, task_id=<id>, state={completed/not_done/pitfalls/blockers/next_action})')
-    body.push('     b. project_artifact_publish(project=…, task_id=<id>, kind="doc", path="<真实存在的文件的绝对路径>", revision="<7位以上git短SHA>")')
-    body.push('        ⚠ 必须是你自己名下的任务才能发；路径必须落在项目目录内且文件真的存在。')
-    body.push('     c. **标 done 之前先跑一遍验收判据**：project_preflight(project=…, task_id=<id>)')
-    body.push('        它执行你合同里的可判定判据（file_exists: / tests_pass: / grep_absent: / sha256: …），')
-    body.push('        告诉你哪条还没过 —— 在**还能改**的时候看到，而不是标完被判不通过再返工。')
-    body.push('        写合同时尽量把验收标准写成判据（自然语言照旧可以写，只是不会被自动验）：')
-    body.push('          file_exists:<路径> / no_placeholders:<路径> / grep_absent:<路径>::<文本> /')
-    body.push('          sha256:<路径>::<摘要> / tests_pass:<命令> / endpoint_ok:<URL>')
-    body.push('     d. project_task_update(project=…, task_id=<id>, status="done", next_action="下一步")')
-    body.push('     e. 代码地图建议在**标 done 之前**更新（那时语义最清楚）；')
-    body.push('        万一忘了、已经标了 done 也没关系 —— 只要你在这个项目里干过（拥有任务 / 近 7 天有检查点）就仍能写。')
-    body.push(...discipline())
-    body.push('  哪些该你自己定、哪些该来问我，你自己判断 —— 但别让下个会话把同样的事再问一遍。')
+    /* ⚠ 2026-09-16 大改：这段原来把"从领活到收尾"的完整流程抄了一遍（约 1900 字），
+       而那份流程现在在 docs\接手任务.md 里。块只留**这一刻特有**的：
+       这个任务自己的 id 怎么拿 + 指路。
+       （合同 / 检查点 / 依赖 / 状态 那些块特有数据在上面，不动。） */
+    body.push('')
+    body.push('★ 怎么做这件事（领活 → 读上下文 → 收尾）在这份说明里：')
+    body.push('     D:\\codex-memory\\docs\\接手任务.md')
+    body.push('')
+    body.push(`  先做的事：project_task_dispatch(project="${p.key}", task_key="${t.key}")`)
+    body.push('     ⚠ 它返回的 **id（32 位 uuid）才是后面所有工具要的 task_id** —— 不是上面那个 key。')
+    body.push('     后面接 project_context_pack(project=…, task_id=<那个 id>) 读上下文。')
+    body.push('')
+    body.push('  ⚠ 两条最容易踩的（细节在文档里）：')
+    body.push('     · ★ **没做完的绝对不要标 done**（平台会按判据拦，改了要 project_task_reopen）。')
+    body.push('     · 收尾顺序别换：检查点五项 → 发产出 → preflight 验判据 → 标 done。')
+
     return body.join('\n')
   }
 
@@ -1244,23 +1231,16 @@ export function projBlock(p: Proj, t?: Task): string {
     body.push(`其他状态 ${rest.length} 个：${rest.map((x) => `${x.key}（${x.status}）`).join('、')}`)
   }
   body.push('')
-  body.push('执行要求：')
-  body.push(`  1) 先看项目现状：project_overview(project="${p.key}") 拿任务清单和最近事件。`)
-  body.push(...mapRequirement(p, '2'))
-  body.push(`  3) 本会话没指定做哪个任务的话，别回来问 —— 直接查可领的：`)
-  body.push(`     project_ready_tasks(project="${p.key}")，挑一个"还没人领"的，`)
-  body.push(`     然后 project_task_dispatch(project="${p.key}", task_key="<挑中的那个>") 领走并拿到 id。`)
-  body.push('     上面每个任务卡也能单独复制接续块，里面带着那个任务的完整交接说明。')
-  /* 这里补一句判据提示（2026-09-16）。为什么需要：
-     这句原来由 discipline() 带进来 —— 而 discipline 里那套引导被删掉了
-     （它是"建卡怎么写判据"，不属于纪律，且导致每个块里重复一遍）。
-     删完发现：现状简报块就**完全没有判据提示**了（实测确认），
-     而它也用得上 —— 现有验收标准若是散文，可以顺手补成判据。
-     所以这里保留一句**短的**（长的那套在"加新任务"块里，不重复）。 */
-  body.push('  4) 合同里的验收标准若还是散文，可以顺手补成**可判定的判据**（平台会按判据拦 done）：')
-  body.push('     file_exists:<路径> / tests_pass:<命令> / grep_absent:<路径>::<文本> 等，')
-  body.push('     要点是把**具体路径 / 具体命令 / 具体 URL** 写出来（详见「加新任务」块）。')
-  body.push(...discipline())
+  /* ⚠ 2026-09-16 大改：这段的通用流程（怎么看现状 / 怎么领活 / 怎么写判据）
+     现在在 docs\接手任务.md 里。块只留**这一刻特有**的：这是本项目的待办清单 + 指路。 */
+  body.push('')
+  body.push('★ 这个项目现在什么情况、该怎么往下做 —— 见这份说明：')
+  body.push('     D:\\codex-memory\\docs\\接手任务.md')
+  body.push(`  一句话：project_overview(project="${p.key}") 看全貌，`)
+  body.push(`         project_ready_tasks(project="${p.key}") 看有哪些活，`)
+  body.push(`         然后 project_task_dispatch(project="${p.key}", task_key="<挑中的>") 领走。`)
+  body.push('  上面每个任务卡也能单独复制「接续块」—— 里面带着那个任务的合同与交接说明。')
+
   return body.join('\n')
 }
 /* ============================================================
@@ -1349,41 +1329,22 @@ function predicateGuide(indent = '      '): string[] {
 
 /* 收尾纪律。三条都是实战里踩出来的：报错要照贴、格式不合法要降级、完成由对账说了算。 */
 function discipline(): string[] {
+  /* ⚠ 2026-09-16 大改：原来这里返回 1800 字的干活纪律，被 5 个块各内联一份
+     （实测合计 9058 字重复）。现在抽成独立文档，这里只留**一行指路**。
+
+     为什么这么改（而不是各块各留一份）：
+       · 那份纪律讲的是"干活和收尾"，而好几种块（比如「开始一个新东西」）
+         那一刻连任务都还没有 —— 对它是废话；
+       · 改一条纪律要改 5 个地方（今晚已经吃过这个苦）；
+       · "会话会去读文档"这个前提**已经成立** —— 新版块本来就要靠文档才知道怎么建项目。
+
+     风险与对价：会话不读文档就学不到纪律。所以那条最要命的
+     （★ 没做完的任务绝对不要标 done）我在文档里放了**开头第一节**，
+     而且开头就点明它是最重的一条。 */
   return [
     '',
-    '  几条纪律：',
-    '    · ★★ **没做完的任务，绝对不要标 done。** 后果最重的一条：',
-    '      标了 done，面板会说这件事完了、下个会话以为不用再管、对账时拿不到东西。',
-    '      而且平台**禁止 done 直接改回 running**（理由 Self-approval），要改回来只能走',
-    '        project_task_reopen(task_id=<id>, session_id=<你>, reason="标早了，实际没做完")',
-    '      ★ 平台还会**替你拦一道**：合同里写了可判定判据、而判据没过时，',
-    '        标 done 会被**直接拒绝**，报错列出没过的那几条和证据。',
-    '        （**纯散文**验收标准的合同不受此限 —— 那种由独立对账裁定。）',
-    '      动手前先问自己：**这活真做完了吗？** 没做完就按实际留状态（pending / blocked / review），',
-    '      别为了收尾硬标 done。',
-    '    · 任何工具报错，把**报错原文**照贴回来（含工具名和完整 message），不要改述、不要假装成功。',
-    '    · 顺序最关键：**先领任务 → 动手 → 更新代码地图 → 检查点/产出 → 最后才标 done**。',
-    '      先标 done 会**发不出产出**（artifact_publish 要求任务在你名下且是活跃任务）。',
-    '      但代码地图不一样 —— 标了 done 也能补写（门禁看的是"你在本项目里干过"）。',
-    '    · 标 done 只是标状态。算不算真完成由**独立对账**说了算，对账人不能是任务所有者：',
-    '      project_reconcile(project=…, task_id=<id>, status="verified", reviewer_session_id=<另一个会话>)。',
-    '      看到 review 状态的任务**别重做** —— 那是"等验收"，去对账（同上）。',
-    '    · **标 done 之前先跑一遍验收判据**：project_preflight(project=…, task_id=<id>)',
-    '      它执行合同里的可判定判据，告诉你哪条还没过 —— 在**还能改**的时候看到。',
-    '      （判据**怎么写**在建卡那一步讲；自然语言验收标准照旧可以写，只是不会被自动验。）',
-    '    · **定下来的设计/技术取舍，顺手记进库** —— 否则下个会话会把同样的事重新讨论一遍：',
-    '      project_decision(project=…, task_id=<id>, title="<一句结论>", decision="<定了什么>",',
-    '                       rationale="<为什么这么定>", evidence=[<文件路径/命令/链接>])',
-    '      重点是 **rationale（为什么）** —— 只写"定了什么"等于没记。',
-    '      它不是强制门禁；但"改了哪个设计、为什么这么改"这类**代码里读不出来的东西**就靠它传下去。',
-    '    · **感觉快没上下文、或要被中断时 —— 先把现场冻住再走**，别硬撑到被截断：',
-    '      project_handoff(project=…, task_id=<id>, from_session_id=<你>, kind="mid-cycle",',
-    '        summary="为什么中断", state={current_edit:[…], in_flight_reasoning:[…],',
-    '        decisions_made:[…], decisions_deferred:[…]})',
-    '      其中 in_flight_reasoning（脑子里还没写下来的推理）**最容易丢** ——',
-    '      代码里根本没有它，会话一断就永久没了。四小节至少写一个。',
-    '    · context_pack 报错或内容被截断（出现 [context truncated …]）时：改用',
-    '      project_overview + project_code_map 分批读，别凭印象开工。',
+    '  ⚠ 干活和收尾的纪律（★ 不许标假 done / 检查点五项 / 中断前冻现场 / 记设计决策…）：',
+    '     见 D:\\codex-memory\\docs\\干活纪律.md —— **动手之前先读它**。',
   ]
 }
 
@@ -1440,68 +1401,27 @@ function mapRequirement(p: Proj, num = '2'): string[] {
 export function splitBlock(p: Proj): string {
   const body: string[] = []
   const hasTasks = p.total > 0
-  body.push(`【给 ${p.name} 加新任务】`)
+  body.push(`【给 ${p.name} 加任务】`)
   body.push(...projInfo(p))
   body.push('')
-  /* ⚠ 这个块原来是"这个项目还没有拆任务"—— 只在 **0 任务项目** 显示。
-     但 `project_bootstrap` 要求至少一个任务、`project_create` 又不在 DSH 白名单，
-     所以会话造不出 0 任务的项目 → **那个条件永远不成立 → 这个块成了死代码**
-     （实测库里只剩 2 个 09-14 建的遗留项目能触发它）。
-     而"给已有项目加新任务"是**真实且常用**的需求，原来反而没有入口。
-     现在口径改成通用的：有任务就"加新任务"，没任务就"首次拆解"。 */
+  /* ⚠ 2026-09-16 大改：原来这块把"怎么建卡"的完整流程抄了一遍（约 5900 字），
+     而那份流程现在在 docs\加新任务.md 里。块只留**这一刻特有**的：
+     这个项目现在什么情况（几个任务）+ 指路。 */
   body.push(hasTasks
-    ? `这个项目现在有 ${p.total} 个任务（已完成 ${p.done}）。下面讲**怎么再加新任务**。`
-    : '这个项目一个任务都还没有。下面讲**怎么把它拆成任务**。')
-  body.push('执行要求（顺序别换）：')
-  body.push(`  1) 先看现状：project_overview(project="${p.key}") 拿项目图和最近事件。`)
-  body.push(...mapRequirement(p, '2'))
-  body.push('  3) ★ **先判断这块活该不该建卡**（这一步最容易把库搞乱）：')
-  body.push('     · 还在某个**已有任务的合同范围内**（acceptance / constraints 里就写着）')
-  body.push('       → **别建新卡**，去那个任务里补一个检查点就够了。')
-  body.push('       建了会变成"两张卡说同一件事"，对账时判不清谁负责。')
-  body.push('     · 合同里**没有**的、执行中新发现的活 → 这才是该建卡的情况。')
-  body.push('     · 纯资料/纯记录类项目 → 不用建卡，把资料结构和来源整理进知识图谱就行，别硬造任务。')
-  body.push('     · 拿不准就问用户，别自己定（这一步判错会留下长期烂账）。')
-  body.push('  4) 要建的话先查重：看上面那份清单，别和现有的重了 ——')
-  body.push('     同一个 key 建第二次会直接报 Task already exists；但换个 key 建同一件事不会报，')
-  body.push('     只会让库里多一张重复卡。')
-  body.push('     ⚠ 还有一条：**平台不允许改任务名 / 说明**（project_task_update 只改 status / next_action）。')
-  body.push('       所以"范围变了"要靠**更新合同**或建新卡解决，不要指望改名。')
-  body.push('  5) 写验收标准时**尽量写成可判定的判据**（建卡时最该花心思的一步）：')
-  /* ⚠ 这里原来自己又写了一遍完整判据引导 —— 而 discipline() 里已经有一份，
-     于是同一个块里同一件事说了两遍（实测 7 个事实重复、约 700 字）。
-     现在共用 predicateGuide()：只出现一次，且两处内容永远一致。 */
-  body.push('     为什么值得：平台会**按判据拦 done**（判据没过就拒绝标 done），判据是你那道门：')
-  body.push('     下面这段写法每个块都有，别跳过 ——')
-  body.push(...predicateGuide('     '))
-  body.push('  6) ★ 建卡这条路分两种情况（先确认是哪一种，别撞墙）：')
-  body.push('     · 先登记自己（没登记后面所有写操作都会失败）：')
-  body.push(`       project_session_register(project="${p.key}", provider="<你的 provider>",`)
-  body.push('                                model="<你的 model>", session_id="<你的会话 id>")')
-  body.push('     · 计划**没锁** → 直接建：')
-  body.push('       project_task_create(project=…, task_key=…, title=…, description=…, priority=…)')
-  body.push("     · 计划**已锁**（报 \"This project's initial plan is locked\"）→ 只能提案：")
-  body.push('       project_plan_propose(project=…, session_id=<你>, reason=<为什么加>,')
-  body.push('         changes=[{operation:"add_task", task_key=…, title=…, description=…,')
-  body.push('                   contract:{objective:…, acceptance:["file_exists:<路径>"]}}])')
-  body.push('       然后**请另一个会话或人来批**（提议者不能审自己的提案）：')
-  body.push('         project_plan_review(proposal_id=…, reviewer_session_id=<审批者>,')
-  body.push('                             decision="approve", note=…)')
-  body.push('       三条硬规则（都实测过）：')
-  body.push('       ① 参数名是 **decision**（取值 "approve" / "reject"）—— 不是 status')
-  body.push('       ② 审批者必须**属于本项目** —— 先让他也 register 一下；')
-  body.push('          报 "Reviewer belongs to another project" 就是这个原因')
-  body.push('       ③ **提议者不能审自己**（报 "cannot review its own plan proposal"）')
-  body.push('       ★ 批准**一次**就**永久解锁**（plan_locked 变 false）：之后建任务直接 project_task_create，')
-  body.push('         不用再提案 —— 所以这条路只走一次。')
-  body.push('  7) ★ **建完卡之后，没做完的卡绝对不要标 done**：')
-  body.push('       · 做完了 → status="done"（标之前先 project_preflight 验判据）')
-  body.push('       · 还要接着做 → 留 pending（它本来就是 pending，什么都不用改）')
-  body.push('       · 卡在外部原因 → status="blocked"')
-  body.push('       · 干完了等别人验 → status="review"')
-  body.push('     标错代价很大：面板会说这件事完了、下个会话以为不用管，')
-  body.push('     而且平台禁止 done→running（要改回来必须走 project_task_reopen）。')
-  body.push('  8) 建完把结果告诉我：加了哪几个任务。**不要自己开子会话分派任务** —— 我自己找人做。')
+    ? `这个项目现在有 ${p.total} 个任务（已完成 ${p.done}）。你要往里**加新任务**。`
+    : '这个项目一个任务都还没有。你要把它**拆成任务**。')
+  body.push('')
+  body.push('★ 做法在这份说明里（含"先判断该不该建卡""计划锁着怎么走提案"等完整步骤）：')
+  body.push('     D:\\codex-memory\\docs\\加新任务.md')
+  body.push('')
+  body.push('  ⚠ 几个容易踩的先提醒（细节在文档里）：')
+  body.push('     · ★ **先判断这块活该不该建卡** —— 还在已有任务合同范围内的，别建新卡。')
+  body.push('     · ★ **先确认计划锁没锁**：没锁直接 project_task_create；')
+  body.push('       锁着只能 project_plan_propose 提案，且**要另一个会话来批**（不能自批）。')
+  body.push('     · 建卡时把**验收标准写成判据**（file_exists: / tests_pass: … 写具体路径/命令）。')
+  body.push('     · 建完之后：**没做完的卡绝对不要标 done**。')
+  body.push('')
+  body.push('  想拆得跟用户对齐再落卡：先把方案给他看，他确认了再建。')
   body.push(...discipline())
   return body.join('\n')
 }
@@ -1883,133 +1803,22 @@ async function copyText(text: string, what: string) {
  * 所以不带 project_key；会话自己知道在做哪个项目。
  */
 export const LIBRARY_RECORD_REQUIREMENT = [
-  `【共享项目库 · 记录要求】`,
+  `【记录进共享库】`,
   ``,
-  `⚠ 本会话可能做了不止一个任务。每一轮做过的都得记，不能只记最后一轮 ——`,
-  `   库里没有"整场会话"这种记录粒度（检查点必须挂在具体任务上），做了 N 个就记 N 次。`,
+  `  你干完活了，要把结果写回库。**做法在这份说明里**（完整步骤，照它做就行）：`,
+  `     D:\\codex-memory\\docs\\记录进库.md`,
   ``,
-  `【第一步 · 盘点】把本会话从开始到现在做过的任务列一遍。改过代码 / 写过文档 /`,
-  `   查过问题并得出过结论 —— 都算。特别注意没在库里领过的那些（最容易漏）。`,
-  `   ⚠ 那一批里如果有的**已经顺手标了 done**（没领过也能标），现在是补记不进库的 ——`,
-  `     逐条试都会报错。用这一条打开：`,
-  `     project_task_reopen(task_id=<id>, session_id=<你>, reason="<为什么要重开>")`,
-  `     它把任务退回 pending（清 owner、留 task_reopened 事件），`,
-  `     之后就能正常走：领 → 补检查点 → 再标 done。`,
-  `     reason 是必填的 —— 平台不留「悄悄改终态」的口子。`,
-  `     （已 done 的任务不能直接改状态：done→running 会被拒，理由是 Self-approval ——`,
-  `       实测有任务被认领 4 次、标 done 3 次，契约/对账/产出全成了可被静默推翻的残留。）`,
-  ``, 
-  `   ★ 更省事的做法（下次开工就这么干）：**一件事一张卡，动手前先建好**。`,
-  `     一个会话往往一口气干好几件事，如果都等干完才回头补卡，就得逐个判断`,
-  `     「这活原来那张卡的合同里有没有要求」（第四步那套），很费神、也容易漏。`,
-  `     开工前先建好卡，收尾时逐个闭环就行，不用再补。`,
-  ``, 
-  `   ★ 感觉快没上下文了 / 要被中断时：**先把现场冻住再走**，别硬撑到被截断。`,
-  `     project_handoff(project=…, task_id=<id>, from_session_id=<你>, kind="mid-cycle",`,
-  `       summary="一句话说明为什么中断",`,
-  `       state={current_edit:[…], in_flight_reasoning:[…], decisions_made:[…], decisions_deferred:[…]})`,
-  `     四个小节（至少写一个）：`,
-  `       current_edit        改到哪了：哪些文件、什么状态、还差什么`,
-  `       in_flight_reasoning ★ 脑子里正在想的（还没写进代码/文档的推理）—— 这条**最容易丢**，`,
-  `                            代码里根本没有它，会话一断就永久没了`,
-  `       decisions_made      已经定的事（写清理由，免得下个人重新讨论一遍）`,
-  `       decisions_deferred  故意留给后面定的事，以及为什么现在不定`,
-  `     不写的话，下个会话要么重读全仓库，要么踩一遍同样的坑。`,
+  `  ⚠ 三件最要紧的先说（全文在文档里）：`,
+  `     1. ★ **没做完的任务，绝对不要标 done。** 标了 done，面板会说这件事完了、`,
+  `        下个会话以为不用再管、对账时拿不到东西；而且平台禁止 done 直接改回 running，`,
+  `        要改回来只能走 project_task_reopen(task_id=<id>, session_id=<你>, reason=…)`,
+  `     2. **本会话做过不止一个任务的话，每轮都要记** —— 检查点必须挂在具体任务上，`,
+  `        做了 N 个就记 N 次，不能只记最后一轮。`,
+  `     3. **发现了但没做的活，必须写进检查点的 not_done** —— 那是它传给下个会话的`,
+  `        唯一通道（面板不显示检查点，不写就等于丢了）。`,
   ``,
-  `【第二步 · 先分流】★ 关键一步，别跳：把第一步列出的任务**分成两堆** ——`,
-  `     · 真做完的（活干完了、东西交出去了）        → 走【第二步 A】`,
-  `     · 没做完的（干了一半 / 发现了但没动 / 卡住了）→ 走【第二步 B】`,
-  `   ⚠ 为什么必须先分流：A 的最后一步是「标 done」。如果对**每一个**任务都一路走到底，`,
-  `     没做完的也会被标成已完成 —— 那是**最严重的一种数据污染**：`,
-  `     面板会说这件事完了、下一个会话以为不用再管、对账时拿不到东西。`,
-  `     宁可少标一个 done，也不要把没做完的标成完成。`,
-  ``,
-  `【第二步 A · 真做完的任务】按这个顺序（顺序错了会把自己锁死）：`,
-  `   ① project_task_dispatch(project=…, task_key="<任务的 key>") → 拿到 id（32 位 uuid）`,
-  `      ⚠ 后面所有工具要的都是这个 **id**，不是 key —— 传 key 会报 Task not found。`,
-  `      没领过任务的后果：发不出产出、标不了完成（都要求"任务在你名下"）。`,
-  `      先标 done 会导致发不出产出（artifact_publish 要求任务是活跃的）；`,
-  `      代码地图不一样 —— 标了 done 也能补写，只要你在本项目里干过。`,
-  `   ② project_checkpoint(project=…, task_id=<id>, state={...}) —— 五项一个都别省：`,
-  `        completed 完成了什么 / not_done 没完成什么 / pitfalls 踩过的坑（★ 最重要，写具体）`,
-  `        / blockers 卡在什么外部依赖 / next_action 下一步`,
-  `      ⚠ 带 next_action 的检查点会一并更新任务的"下一步"并让面板刷新；不带就不会动面板。`,
-  `   ③ project_artifact_publish(project=…, task_id=<id>, kind="doc", path="<真实文件绝对路径>")`,
-  `      路径必须落在项目目录内、文件必须真的存在，否则当场报错。`,
-  `   ④ 标 done 之前先跑一遍验收判据：project_preflight(project=…, task_id=<id>)`,
-  `      它执行合同里的可判定判据，告诉你哪条还没过 —— 在**还能改**的时候看到。`,
-  `      ⚠ **preflight 报"判据没过"就说明它没做完 —— 挪到【第二步 B】，不要标 done。**`,
-  `      （判据怎么写在【第四步】；合同改动会留版本历史，project_contract_history 可查。）`,
-  `   ⑤ project_task_update(project=…, task_id=<id>, status="done", next_action="下一步")`,
-  `      ★★ **平台会替你拦一道**：合同里有可判定判据、而判据没过时，标 done 被**直接拒绝**，`,
-  `         报错列出没过的那几条和证据。看到它**不要绕**（别改判据、别标 failed 蒙过去）——`,
-  `         它就是在说"这活没做完"，按【第二步 B】处理。`,
-  `         ⚠ 只有**纯散文**验收标准的合同不受此限（靠独立对账裁定）——`,
-  `           也就是说：**没写判据的任务，平台拦不住假 done**（判据怎么写在【第四步】）。`,
-  `         ⚠ 真要带病收尾（判据已过时、不再反映要求）→ **先改合同**让判据反映现实`,
-  `           （会留版本历史），别用 allow_unmet=True 硬过 —— 那个口子不是给"我不想补"用的。`,
-  `   ⑥ 代码地图要在标 done 之前更新（那时语义最清楚）。已经标了 done 也能补写 ——`,
-  `      只要你在本项目里干过（拥有任务 / 近 7 天有检查点）就放行。`,
-  ``,
-  `【第二步 B · 没做完的任务】★ 这一堆**绝对不要标 done**。只做两件事：`,
-  `   ① 把"干到哪了"写进检查点（**这项必做**，不写就等于这轮白干）：`,
-  `      project_checkpoint(project=…, task_id=<id>, state={`,
-  `          completed:[这轮真的做完了什么], not_done:[还没做的、差什么],`,
-  `          pitfalls:[踩的坑，写具体], blockers:[卡在什么外部依赖], next_action:下一步})`,
-  `      （任务不在你名下 —— 就是没领过 —— 先用 project_task_dispatch 领下来再写；`,
-  `        已经是 done 的要先 project_task_reopen 退回队列，见上面第一步。）`,
-  `   ② 状态**按实际情况留**，不是一律 done：`,
-  `      · 还要接着做            → 留 pending（什么都不用改，它本来就是）`,
-  `      · 卡在外部原因（等人 / 等审批 / 等对方接口）→ status="blocked"`,
-  `      · 干完了、等别人验      → status="review"`,
-  `   ③ **不要**为了"看起来收尾了"而标 done。没做完就是没做完 ——`,
-  `      标了 done 会让面板说谎、让下个会话漏掉、让对账无从下手。`,
-  ``,
-  `   ⚠ 干活期间定期发一次心跳：project_session_heartbeat(session_id=<你的 id>, task_id=<id>)`,
-  `     为什么必须发：面板判「在不在干」靠两件事，平台已把它们拆成两个字段 ——`,
-  `       · 心跳续的是 **liveness**（「我还在」）：超过 2 小时不发，会话会被回落到 idle、任务被释放`,
-  `       · 检查点/产出动的是 **progress**（「我在推进」）：心跳**不会**动它`,
-  `     所以「光发心跳不写检查点」不会让你变回「待开始」（那正是以前那个 bug，已修），`,
-  `     面板会显示「进行中」但打上**「占着没推进」**的标记 —— 那是提醒你该写检查点了，不是说你没干。`,
-  `     ★ 干长活之前先声明 ETA，面板在 ETA 之前就不会催你：`,
-  `       project_session_heartbeat(session_id=<你的 id>, task_id=<id>, eta_seconds=5400)`,
-  `       活比预期久就**再发一次带新 eta_seconds 的心跳**改一下 —— 报错的 ETA 比不报更糟。`,
-  ``,
-  `【第三步 · 自检】逐个念一遍（★ 第 1 问是重点，专门防"没做完的被标成完成"）：`,
-  `   1. **我标成 done 的每一个任务，真的做完了吗？**`,
-  `      逐条问自己：活干完了吗？东西交出去了吗？preflight 过了吗？`,
-  `      只要有一条答案是"没有" —— 那就是标错了，要改回来：`,
-  `        project_task_reopen(task_id=<id>, session_id=<你>, reason="标早了，实际没做完")`,
-  `      然后按【第二步 B】处理（写检查点、状态留 pending 或 blocked）。`,
-  `      ⚠ 宁可事后多改一条，也不要留一个假的 done —— 假的 done 会被下个会话当成不用管。`,
-  `   2. 我第一步列出的任务，每一个都有检查点了吗？没走完的有没有走完？`,
-  `   3. 没做完的那些，状态对不对（pending / blocked / review，而不是 done）？`,
-  ``,
-  `【第四步 · 判断要不要新建卡】—— 这一步最容易把库搞乱，务必走一遍。`,
-  `   干完一块活先问：这块活**原来任务的合同里有没有要求**？（合同在 context pack 里。）`,
-  ``,
-  `   · 合同里要求的 → **别建新卡**，在原任务里补一个检查点就够了。`,
-  `     建了会变成"两张卡说同一件事"，对账时判不清谁负责。`,
-  `   · 合同里没有的、执行中新发现的活 → **建新卡**：做完标 done，没做完留 pending。`,
-  `     建之前再确认一次它不是原任务的组成部分 —— 拿不准就问人，别自己定。`,
-  `   · 真发现范围变了 → 平台**不允许改任务名/说明**（project_task_update 只改`,
-  `     status / next_action）。正确做法是**更新合同**或拆新卡，别靠改数据库绕过。`,
-  ``,
-  `   ★ 建卡时把**验收标准写成判据**（这是最该花心思的一步，也是这条门禁的前提）：`,
-  `     file_exists:<路径> / no_placeholders:<路径> / grep_absent:<路径>::<文本> /`,
-  `     sha256:<路径>::<摘要> / tests_pass:<命令> / endpoint_ok:<URL>`,
-  `     要点：把**具体路径 / 具体命令 / 具体 URL** 写出来 —— 不写会生成一条模糊的`,
-  `     默认验收标准，判不了，平台也就拦不住假 done。`,
-  `     ⚠ 别指望自动转换：实测全库 176 条验收标准自动提判据**只提出 9 条**（5%）。`,
-  ``,
-  `   ⚠ 无论建不建卡：**发现了但没做的活，必须写进检查点的 not_done**。`,
-  `     那是它传到下一个会话的唯一通道 —— 面板不显示检查点，不写就等于丢了。`,
-  ``,
-  `   建卡门禁（计划锁着怎么走提案、谁来批）→ 点项目卡上的「拆任务」按钮，`,
-  `   那里有完整实测过的步骤和三个硬规则。这里不重复。`,
-  ``,
-  `想让面板动，必须动**任务本身**（状态 / 说明 / 下一步）—— 面板读的是它。`,
-  `完整机制（含各种门禁和报错原因）见 D:\\codex-memory\\README.md 和各项目 AGENTS.md。`,
+  `  收尾顺序（写反了会把自己锁死）：检查点五项 → 发产出 → preflight 验判据 → 标 done。`,
+  `  通用纪律（含"标错了怎么改回来"）见 D:\\codex-memory\\docs\\干活纪律.md。`,
 ].join('\n')
 
 /* ============ 开一个新项目（右上角按钮复制的就是它）============
