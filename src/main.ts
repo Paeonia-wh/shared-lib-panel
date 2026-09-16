@@ -1112,6 +1112,13 @@ export function projBlock(p: Proj, t?: Task): string {
       body.push(`  project_task_reopen(task_id=<下面那个 id>, session_id=<你的 id>, reason="<为什么要重开>")`)
       body.push('  它把任务退回 pending 并留 task_reopened 事件（reason 必填，平台不留悄悄改终态的口子）；')
       body.push('  之后就能正常走：领 → 补检查点 → 再标 done。')
+      /* ★ 重开有上限（2026-09-16 加）：同一张卡重开到第 3 次会自动变 blocked。
+         为什么必须在这里说：这个块是"要接着做"时读的，而它只教了 reopen ——
+         不说上限的话，会话重开到第三次会莫名看到任务变成 blocked，以为出错。
+         真实含义是"这活干不下去（范围没定清/缺外部依赖/判据有问题），该人来定"。 */
+      body.push('  ⚠ **但有上限**：同一张卡重开到第 3 次，平台会自动把它标成 `blocked`')
+      body.push('     （反复重开 = 这活干不下去，不是在"再试一遍"）。看到它变 blocked，')
+      body.push('     不是失败 —— 是"该人来定怎么走了"，去问用户，别再重开第四遍。')
       /* 这里原来写的是 project_task_dispatch —— **实测拿不到**：
          dispatch 回的是 task:null + reason:already done（claim 有状态白名单）。
          已 done 的任务只能从 overview 里找，不能再走派发。 */
