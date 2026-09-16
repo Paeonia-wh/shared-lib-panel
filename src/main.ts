@@ -385,6 +385,91 @@ export const __botSetAutoplayEnabled = (on: boolean) => {
    所以要一个**标记**，让"关掉"这件事在重排时也守得住。 */
 let autoplayOff = false
 
+/* ==================================================================
+   ② 球的"心情"：有活在推进 / 有卡住的 / 全闲（2026-09-16 加）
+   ==================================================================
+
+   ## 为什么是"状态驱动"而不是"定时换"
+
+   ① 是**点事件**（库里发生了一件事）→ 事件驱动 + 冷却，所以有"间隔"。
+   ② 是**一个面**（库里现在的整体状况）→ 只在**状态真的变了**才该变。
+   给 ② 定固定间隔是错的：那就成了"每 30 秒换个样子"的背景噪音，
+   而且用户永远学不会"这个样子是什么意思"。
+
+   所以更新点只有**一处**：`applyProjects()` ——
+   也就是"数据来了"的时候。它由 SSE（实时）和轮询（5 秒兜底）共同喂。
+
+   ## 颜色**不参与**（用户 2026-09-16 明确要求）
+
+   用户原话："颜色就纯随机 真随机 完全随机"。
+   所以这一版**完全不碰 `setColor`** —— 自动换色照旧随机。
+   心情只走**生命感**（呼吸/漂移的幅度 + 视线活力度）。见 face.ts 的 vitality。
+
+   ## 三档
+
+     stuck  有卡住的：stalledTasks>0 或 overdueEta>0    → vitality 1.15（像"警觉"）
+     alive  有活在推进：liveClaims>0 或 liveTasks>0 或 lastWorkMin<=90 → 1.0（原样）
+     quiet  全闲                                        → 0.85（像"打盹"）
+
+   ⚠ 为什么不把"全闲"做得更夸张（比如 0.5）：
+     球整天在角落待着，**大部分时间都是"全闲"**。做得太明显就变成
+     "这个球永远半死不活" —— 那也是噪音。0.85 是"看得出来但不烦人"的量。
+*/
+type BotMood = 'alive' | 'stuck' | 'quiet'
+const MOOD_VITALITY: Record<BotMood, number> = { alive: 1, stuck: 1.15, quiet: 0.85 }
+
+let botMood: BotMood = 'alive'        /* 还没数据时按"正常"处理（别一上来就装睡） */
+let moodAt = -999                     /* 上次心情**真的**变了的时刻（防抖用） */
+/** 心情变化的防抖（秒）。为什么需要：库里的计数会**抖** ——
+    一个会话写着检查点，`lastWorkMin` 会在 90 分钟边界上进进出出；
+    不防抖的话球会每隔几秒闪一下，比不动还烦。 */
+const MOOD_DEBOUNCE = 20
+
+/** 按库里的数据算心情。只看**已经有的**字段（都是我核过的）。 */
+function moodFromProjects(): BotMood {
+  /* ⚠ 这里查过一个真 bug（2026-09-16，测试抓到的）：
+     原来那个"还没数据就别装睡"的 guard 写的是
+         if (stuck === 0 && alive === 0) return botMood
+     —— 它判的是"**有没有信号**"。而"有一行数据、那行既没在干活也没卡住"
+     也会命中它 → 于是 `quiet` 那一档**永远到不了**，整条 ② 的一半就废了。
+     正确的判据是"**有没有数据**"：没数据 = 面板还没读到，按正常；
+     有数据但没信号 = 真的全闲 → 该 quiet。 */
+  if (ALL.length === 0) return botMood === 'stuck' ? 'alive' : botMood
+
+  let stuck = 0, alive = 0
+  for (const p of ALL) {
+    stuck += (p.stalledTasks || 0) + (p.overdueEta || 0)
+    if ((p.liveClaims || 0) > 0 || (p.liveTasks || 0) > 0) alive++
+    else if ((p.lastWorkMin ?? -1) >= 0 && (p.lastWorkMin as number) <= 90) alive++
+  }
+  if (stuck > 0) return 'stuck'
+  if (alive > 0) return 'alive'
+  return 'quiet'
+}
+
+/**
+ * 把心情喂给引擎。由 `applyProjects()` 调 —— 也就是"数据来了"的时候。
+ *
+ * ⚠ 防抖：除非是"转成有卡住的"（那是要人看的信号，不该等），
+ *   否则两次变化之间至少隔 `MOOD_DEBOUNCE` 秒。
+ */
+function applyMood(now: number): void {
+  const next = moodFromProjects()
+  if (next === botMood) return
+  const urgent = next === 'stuck'                  /* 卡住是要人看的，不等 */
+  if (!urgent && now - moodAt < MOOD_DEBOUNCE) return
+  botMood = next
+  moodAt = now
+  engine.setVitality(MOOD_VITALITY[next], now)
+}
+
+/* 测试用：把心情探出来 + 直接喂一个心情（不然只能靠造真数据）。 */
+export const __botMoodProbe = () => ({ mood: botMood, at: moodAt, vitality: MOOD_VITALITY[botMood] })
+export const __botApplyMood = (now: number) => applyMood(now)
+/** 测试用：走**完整链路**（applyProjects → 心情）——
+    只测 applyMood 是测不出"数据 → 心情"那一段的。 */
+export const __botApplyProjects = (list: any[]) => applyProjects(list)
+
 let shapeNextAt = 0            // 下一次换形状
 let colorNextAt = 0            // 下一次换色
 let inkShapeId: string = DEFAULT_SHAPE
@@ -795,6 +880,13 @@ function applyProjects(list: any[]): void {
   ].filter((g) => g.items.length > 0)
   rebuildAll()
   everLoaded = true
+  /* ★ 心情（②，2026-09-16 加）：**在指纹短路之前**算。
+     为什么位置重要：下面那句 `if (fp === lastFingerprint) return` 会在
+     "数据没变"时提前返回 —— 而心情是**独立于重绘**的一件事
+     （计数没变，但"有没有人在干"可能已经变了）。
+     放在 return 之后的话，心情永远不会更新。 */
+  applyMood(clock)
+
   /* 指纹要含**真正会变**的东西。
      原来只有计数和 ago（由 project.updated_at 推出来的相对时间），于是
      "只改了任务说明/状态、计数没变"的情况会被判定成没变化 → 不重绘（实测踩到过）。

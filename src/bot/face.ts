@@ -147,10 +147,29 @@ export interface LivelinessOptions {
   wander?: number
   blink?: boolean
   float?: boolean
+  /**
+   * 生命感整体的**幅度**缩放（2026-09-16 加，给"心情"用）。
+   *
+   * 为什么需要它：球的呼吸和漂移是**引擎内部算的** —— 外面只能调 `wander`。
+   * 而"心情"（有活在推进 / 有卡住的 / 全闲）最自然的表达就是**整体活力度**：
+   * 警觉时呼吸重一点、打盹时慢下来。不开口子的话就只能在 main.ts 里另起一套，
+   * 那会和 `offsetY` 的过渡打架。
+   *
+   * 取值口径：
+   *   1    = 原样（**有活在推进** —— 默认）
+   *   >1   = 更活（**有卡住的**：像"警觉"）
+   *   <1   = 更静（**全闲**：像"打盹"）
+   *
+   * ⚠ 只缩**幅度**，不动**相位**（`t` 不参与缩放）——
+   *   所以"变活/变静"是幅度变化，不是节奏跳拍。
+   *   呼吸周期仍是 3.4 秒（那是从参考视频量出来的，不该动）。
+   */
+  vitality?: number
 }
 
 export function liveliness(t: number, opt: LivelinessOptions = {}): Liveliness {
-  const { wander = 1, blink = true, float = true } = opt
+  const { wander = 1, blink = true, float = true, vitality = 1 } = opt
+  const amp = Math.max(0, vitality)
 
   // Periodes premieres entre elles : la derive ne se repete jamais a l'oeil.
   return {
@@ -161,10 +180,10 @@ export function liveliness(t: number, opt: LivelinessOptions = {}): Liveliness {
     // Au repos la video est quasiment immobile (centre stable a +-0.003, rayon
     // constant) : toute la vie passe par le regard et les clignements. On garde
     // juste de quoi ne pas figer completement l'image.
-    driftX: float ? loopNoise(t, 7.9, 1.9) * 0.006 : 0,
-    driftY: float ? loopNoise(t, 5.3, 0.3) * 0.007 : 0,
+    driftX: float ? loopNoise(t, 7.9, 1.9) * 0.006 * amp : 0,
+    driftY: float ? loopNoise(t, 5.3, 0.3) * 0.007 * amp : 0,
     // La largeur est constante, seule la hauteur respire tres legerement.
-    breath: float ? 1 + Math.sin((t / 3.4) * Math.PI * 2) * 0.005 : 1
+    breath: float ? 1 + Math.sin((t / 3.4) * Math.PI * 2) * 0.005 * amp : 1
   }
 }
 

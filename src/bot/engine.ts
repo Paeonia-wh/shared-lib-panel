@@ -152,6 +152,15 @@ export class BotEngine {
   /** duree de rattrapage en cours ; voir `LOOK_MORPH`, sa valeur par defaut */
   private lookMorph = 0.24
 
+  /* 活力度（见 setVitality）。1 = 原样。过渡比形状慢一点：
+     "心情"是个慢信号，两秒内平滑过去足够了 —— 太快会像被打了一下。 */
+  private vitality = 1
+  private vitalityPrev = 1
+  private vitalityAt = -10
+
+  /** 活力度的过渡时长（秒） */
+  static readonly VITALITY_MORPH = 1.6
+
   /** duree du morph quand on change la forme du corps */
   static readonly SHAPE_MORPH = 0.45
 
@@ -241,8 +250,7 @@ export class BotEngine {
    * setter horodate, jamais par une variable lue pendant `sample`, sinon le
    * moteur cesse d'etre une fonction pure du temps.
    */
-  setLook(look: Look | null, now: number, morph = BotEngine.LOOK_MORPH) {
-    /*
+  setLook(look: Look | null, now: number, morph = BotEngine.LOOK_MORPH) {    /*
      * Une cible non finie est refusee. Le moteur GARDE la derniere : un `NaN`
      * pose une seule fois se propagerait a chaque image et le bot ne se
      * reposerait plus jamais. C'est arrive pour de vrai — un
@@ -257,6 +265,32 @@ export class BotEngine {
     this.look = look ?? NO_LOOK
     this.lookAt = now
     this.lookMorph = morph
+  }
+
+  /**
+   * 整体的**活力度**（2026-09-16 加，给"心情"用）。
+   *
+   * 为什么放在引擎上而不是外面：呼吸和漂移都算在 `liveliness()` 里
+   * （见 face.ts），而它是在 `sample()` 内部调用的 —— 外面看不见、也改不了。
+   * 所以只能从引擎这一层往下传。
+   *
+   * 取值：1 = 原样；>1 = 更活（有卡住的，像"警觉"）；<1 = 更静（全闲，像"打盹"）。
+   * 只缩幅度、不动相位 —— 变活变静是幅度变化，不是节奏跳拍。
+   */
+  setVitality(v: number, now = 0) {
+    if (!Number.isFinite(v)) return          /* 和 setLook 一样：坏值一律不接受 */
+    const next = clamp(v, 0.15, 2.5)         /* 限位：别让它把球"冻死"或"抖成筛子" */
+    if (next === this.vitality) return
+    /* 从上一帧的值开始过渡 —— 和 setLook 同一套做法（不硬切） */
+    this.vitalityPrev = this.vitalityAtTime(now)
+    this.vitality = next
+    this.vitalityAt = now
+  }
+
+  private vitalityAtTime(now: number): number {
+    const k = (now - this.vitalityAt) / BotEngine.VITALITY_MORPH
+    if (k >= 1) return this.vitality
+    return this.vitalityPrev + (this.vitality - this.vitalityPrev) * easings.easeOutQuint(clamp(k))
   }
 
   /** Regard effectif a l'instant `now`, rattrapage en cours compris. */
@@ -460,7 +494,11 @@ export class BotEngine {
     // --- vie au repos -----------------------------------------------------
     const alive = pose.eyeAlpha > 0.01
     const look = this.lookAtTime(now)
-    const life = liveliness(now, { wander: alive ? look.wander : 0, blink: alive })
+    const life = liveliness(now, {
+      wander: alive ? look.wander : 0,
+      blink: alive,
+      vitality: alive ? this.vitalityAtTime(now) : 1,
+    })
 
     const gaze = {
       // Les deux visees REMPLACENT celles de la pose au lieu de s'y ajouter (voir

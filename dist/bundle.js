@@ -220,7 +220,8 @@
     return 1;
   }
   function liveliness(t, opt = {}) {
-    const { wander = 1, blink = true, float = true } = opt;
+    const { wander = 1, blink = true, float = true, vitality = 1 } = opt;
+    const amp = Math.max(0, vitality);
     return {
       dYaw: (loopNoise(t, 11.3, 0.4) * 5.5 + loopNoise(t, 3.7, 2.1) * 1.6) * wander,
       dPitch: (loopNoise(t, 9.1, 1.3) * 4.2 + loopNoise(t, 4.3, 0.7) * 1.3) * wander,
@@ -229,10 +230,10 @@
       // Au repos la video est quasiment immobile (centre stable a +-0.003, rayon
       // constant) : toute la vie passe par le regard et les clignements. On garde
       // juste de quoi ne pas figer completement l'image.
-      driftX: float ? loopNoise(t, 7.9, 1.9) * 6e-3 : 0,
-      driftY: float ? loopNoise(t, 5.3, 0.3) * 7e-3 : 0,
+      driftX: float ? loopNoise(t, 7.9, 1.9) * 6e-3 * amp : 0,
+      driftY: float ? loopNoise(t, 5.3, 0.3) * 7e-3 * amp : 0,
       // La largeur est constante, seule la hauteur respire tres legerement.
-      breath: float ? 1 + Math.sin(t / 3.4 * Math.PI * 2) * 5e-3 : 1
+      breath: float ? 1 + Math.sin(t / 3.4 * Math.PI * 2) * 5e-3 * amp : 1
     };
   }
   function blinkScale(lid) {
@@ -1328,6 +1329,11 @@
       __publicField(this, "lookAt", -10);
       /** duree de rattrapage en cours ; voir `LOOK_MORPH`, sa valeur par defaut */
       __publicField(this, "lookMorph", 0.24);
+      /* 活力度（见 setVitality）。1 = 原样。过渡比形状慢一点：
+         "心情"是个慢信号，两秒内平滑过去足够了 —— 太快会像被打了一下。 */
+      __publicField(this, "vitality", 1);
+      __publicField(this, "vitalityPrev", 1);
+      __publicField(this, "vitalityAt", -10);
       this.scale = scale;
       this.cur = initial;
       this.shape = shape;
@@ -1402,6 +1408,29 @@
       this.look = look ?? NO_LOOK;
       this.lookAt = now;
       this.lookMorph = morph;
+    }
+    /**
+     * 整体的**活力度**（2026-09-16 加，给"心情"用）。
+     *
+     * 为什么放在引擎上而不是外面：呼吸和漂移都算在 `liveliness()` 里
+     * （见 face.ts），而它是在 `sample()` 内部调用的 —— 外面看不见、也改不了。
+     * 所以只能从引擎这一层往下传。
+     *
+     * 取值：1 = 原样；>1 = 更活（有卡住的，像"警觉"）；<1 = 更静（全闲，像"打盹"）。
+     * 只缩幅度、不动相位 —— 变活变静是幅度变化，不是节奏跳拍。
+     */
+    setVitality(v, now = 0) {
+      if (!Number.isFinite(v)) return;
+      const next = clamp(v, 0.15, 2.5);
+      if (next === this.vitality) return;
+      this.vitalityPrev = this.vitalityAtTime(now);
+      this.vitality = next;
+      this.vitalityAt = now;
+    }
+    vitalityAtTime(now) {
+      const k = (now - this.vitalityAt) / _BotEngine.VITALITY_MORPH;
+      if (k >= 1) return this.vitality;
+      return this.vitalityPrev + (this.vitality - this.vitalityPrev) * easings.easeOutQuint(clamp(k));
     }
     /** Regard effectif a l'instant `now`, rattrapage en cours compris. */
     lookAtTime(now) {
@@ -1553,7 +1582,11 @@
       }
       const alive = pose.eyeAlpha > 0.01;
       const look = this.lookAtTime(now);
-      const life = liveliness(now, { wander: alive ? look.wander : 0, blink: alive });
+      const life = liveliness(now, {
+        wander: alive ? look.wander : 0,
+        blink: alive,
+        vitality: alive ? this.vitalityAtTime(now) : 1
+      });
       const gaze = {
         // Les deux visees REMPLACENT celles de la pose au lieu de s'y ajouter (voir
         // `Look`), et le tour se retranche en chemin. La derive s'ajoute APRES le
@@ -1621,6 +1654,8 @@
       };
     }
   };
+  /** 活力度的过渡时长（秒） */
+  __publicField(_BotEngine, "VITALITY_MORPH", 1.6);
   /** duree du morph quand on change la forme du corps */
   __publicField(_BotEngine, "SHAPE_MORPH", 0.45);
   /**
@@ -4170,6 +4205,34 @@
     }
   };
   var autoplayOff = false;
+  var MOOD_VITALITY = { alive: 1, stuck: 1.15, quiet: 0.85 };
+  var botMood = "alive";
+  var moodAt = -999;
+  var MOOD_DEBOUNCE = 20;
+  function moodFromProjects() {
+    if (ALL.length === 0) return botMood === "stuck" ? "alive" : botMood;
+    let stuck = 0, alive = 0;
+    for (const p of ALL) {
+      stuck += (p.stalledTasks || 0) + (p.overdueEta || 0);
+      if ((p.liveClaims || 0) > 0 || (p.liveTasks || 0) > 0) alive++;
+      else if ((p.lastWorkMin ?? -1) >= 0 && p.lastWorkMin <= 90) alive++;
+    }
+    if (stuck > 0) return "stuck";
+    if (alive > 0) return "alive";
+    return "quiet";
+  }
+  function applyMood(now) {
+    const next = moodFromProjects();
+    if (next === botMood) return;
+    const urgent = next === "stuck";
+    if (!urgent && now - moodAt < MOOD_DEBOUNCE) return;
+    botMood = next;
+    moodAt = now;
+    engine.setVitality(MOOD_VITALITY[next], now);
+  }
+  var __botMoodProbe = () => ({ mood: botMood, at: moodAt, vitality: MOOD_VITALITY[botMood] });
+  var __botApplyMood = (now) => applyMood(now);
+  var __botApplyProjects = (list) => applyProjects(list);
   var shapeNextAt = 0;
   var colorNextAt = 0;
   var inkShapeId = DEFAULT_SHAPE;
@@ -4505,6 +4568,7 @@
     ].filter((g) => g.items.length > 0);
     rebuildAll();
     everLoaded = true;
+    applyMood(clock);
     const fp = JSON.stringify(items.map((r) => [
       r.key,
       r.total,
