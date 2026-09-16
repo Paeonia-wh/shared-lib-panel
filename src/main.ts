@@ -7,6 +7,9 @@
 import { BotEngine, type BotFrame } from './bot/engine'
 import { RAYON, DEMI_VIEWBOX } from './bot/repere'
 import { mixHex, COLORS, SHAPES, SHAPE_BY_ID, DEFAULT_SHAPE } from './bot/skins'
+/* STATE_BY_ID：截图生成器要按每个 state **自己的 duration** 采样
+   （晚采会只剩"回复后的平静脸"）—— 见 __mockActionFrame 的注释。 */
+import { STATE_BY_ID } from './bot/states'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { isTauri, initTauri, expandWindow, collapseWindow, beginDrag, dragBy } from './tauri'
@@ -666,6 +669,52 @@ export const __botPerfTick = (now: number) => tickPerform(now)
 export const __mockBallFrame = (t = 1.2) => {
   const e = new BotEngine(R, 'idle', null, null)
   return frameMarkup(e.sample(t), curInk())
+}
+
+/** 截图生成器用：**指定形状 + 颜色**出一帧（画"形状×配色"总览图用）。
+    ⚠ 这个和 `__mockBallFrame` 一样只是导出，不改面板任何行为。 */
+export const __mockBallVariant = (shapeId: string, ink: string, t = 1.2) => {
+  const sp = SHAPE_BY_ID.get(shapeId) ?? SHAPE_BY_ID.get(DEFAULT_SHAPE)!
+  const e = new BotEngine(R, 'idle', null, null)
+  e.setShape([...sp.radii], 0)
+  /* 让形状形变走完（SHAPE_MORPH = 0.45s），否则画出来还是圆的 */
+  return frameMarkup(e.sample(t + 1), ink)
+}
+/** 可选的形状 / 颜色清单（给生成器用，免得两边各写一份） */
+export const __mockBallOptions = () => ({
+  shapes: SHAPES.map((s) => s.id),
+  colors: COLORS.map((c) => ({ id: c.id, hex: c.hex })),
+})
+
+/** 截图生成器用：出**指定动作**的一帧（画"球会做的动作"总览图用）。
+
+    ⚠ 采样时刻很关键（第一版全画成了同一个黑球）：
+    我原来按 `ACTION_HOLD[state] * 0.5` 采（约 1.2 秒）——
+    **太晚了**，每个动作的视觉特征（歪头、蓝点、感叹号）都在**早期**，
+    晚采就只剩"回复后的平静脸"。
+    正确做法：按 **state 自己的 `duration`** 采（引擎的形变 0.45s + 一点），
+    这样采到的正是那个动作最有辨识度的时刻。 */
+export const __mockActionFrame = (stateId: string, at = 0.55) => {
+  const e = new BotEngine(R, 'idle', null, null)
+  const def = STATE_BY_ID.get(stateId as any)
+  const duration = def?.duration ?? ACTION_HOLD[stateId] ?? 2.4
+  e.setState(stateId as any, 0)
+  /* 0.45s 是引擎的形变时长；乘 at 让每个动作都在它自己时长的
+     靠前处取样（那里特征最强）。 */
+  return frameMarkup(e.sample(duration * at), curInk())
+}
+
+/** 截图/动图生成器用：出一帧球，并**套上一层变换**（给表演层的大动作造帧）。
+    为什么需要：蹦/转圈/荡秋千的变换在 main.ts 的 `tickPerform` 里算
+    （`performTransform`），而那是每帧渲染流程的一部分，外部调不到。
+    生成器要"逐帧录一段真动作"，就得能把变换传进来单独出帧。 */
+export const __mockBallTransformFrame = (transform: string, t = 1.2) => {
+  const e = new BotEngine(R, 'idle', null, null)
+  let inner = frameMarkup(e.sample(t), curInk())
+  if (transform) {
+    inner = inner.replace('<g id="perf">', `<g id="perf" transform="${transform}">`)
+  }
+  return inner
 }
 
 let shapeNextAt = 0            // 下一次换形状

@@ -4348,6 +4348,31 @@
     const e = new BotEngine(R2, "idle", null, null);
     return frameMarkup(e.sample(t), curInk());
   };
+  var __mockBallVariant = (shapeId, ink, t = 1.2) => {
+    const sp = SHAPE_BY_ID.get(shapeId) ?? SHAPE_BY_ID.get(DEFAULT_SHAPE);
+    const e = new BotEngine(R2, "idle", null, null);
+    e.setShape([...sp.radii], 0);
+    return frameMarkup(e.sample(t + 1), ink);
+  };
+  var __mockBallOptions = () => ({
+    shapes: SHAPES.map((s) => s.id),
+    colors: COLORS.map((c) => ({ id: c.id, hex: c.hex }))
+  });
+  var __mockActionFrame = (stateId, at = 0.55) => {
+    const e = new BotEngine(R2, "idle", null, null);
+    const def = STATE_BY_ID.get(stateId);
+    const duration = def?.duration ?? ACTION_HOLD[stateId] ?? 2.4;
+    e.setState(stateId, 0);
+    return frameMarkup(e.sample(duration * at), curInk());
+  };
+  var __mockBallTransformFrame = (transform, t = 1.2) => {
+    const e = new BotEngine(R2, "idle", null, null);
+    let inner = frameMarkup(e.sample(t), curInk());
+    if (transform) {
+      inner = inner.replace('<g id="perf">', `<g id="perf" transform="${transform}">`);
+    }
+    return inner;
+  };
   var shapeNextAt = 0;
   var colorNextAt = 0;
   var inkShapeId = DEFAULT_SHAPE;

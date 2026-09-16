@@ -131,11 +131,31 @@ sequenceDiagram
 
 ## 快速开始
 
+### 路线 A · 只想用（**推荐**，不装任何编译工具）
+
+> ⚠️ **注意：现在还没有发布编译好的安装包**（GitHub Releases 是空的），
+> 所以这条路暂时走不通 —— 想要的话开个 issue 催一下，或者走路线 B。
+> 一旦有 release，这里会变成"下载 → 双击"。
+
+### 路线 B · 从源码跑
+
+**要先装什么，看你想跑到哪一步：**
+
+| 你想做什么 | 要装 | 体积 |
+|---|---|---|
+| 只改**界面**（HTML/CSS/TS） | Node.js | ~100MB |
+| 改**面板外壳**（窗口、数据库、SSE） | 上面 + **Rust 工具链** | +1.3GB |
+| **编译成 exe** | 上面 + **VS Build Tools + Windows SDK** | **+5~7GB** |
+
+**那个 VS Build Tools 是整条链上最大的一块（5~7GB）**，而它只是 Rust 编译 C++ 依赖用的。
+**如果你只是想改界面看看效果，用 `npm run dev` 就够了，不用装 Rust。**
+
 ```bash
 # 1) 先跑起共享项目库（另一个仓库）
 git clone https://github.com/Paeonia-wh/codex-memory.git
 cd codex-memory/repo
-./scripts/start-memoryd-silent.ps1     # 起 PostgreSQL + memoryd
+./scripts/bootstrap.ps1 -Minimal         # 精简档 ~2GB（详见那边的 SETUP.md）
+./scripts/start-memoryd-silent.ps1       # 起 PostgreSQL + memoryd
 #    ⚠ 不要用 start-services.ps1 —— 它**已废弃**（会弹终端窗口 + 传参不对会静默失败）
 #    详细步骤见：https://github.com/Paeonia-wh/codex-memory/blob/main/docs/SETUP.md
 
@@ -143,10 +163,10 @@ cd codex-memory/repo
 git clone https://github.com/Paeonia-wh/shared-lib-panel.git
 cd shared-lib-panel
 npm install
-npm run dev                  # 开发模式（热重载）
-npm run build                # 出正式安装包（Tauri bundle）
+npm run dev                  # 开发模式（热重载）—— 只改界面的话到这里就够了
 
-# 只编译不打包（想直接跑 exe 时用这个，快很多）
+# 3) 要出 exe 才需要（此时才需要 Rust + VS Build Tools）
+npm run build                # 出正式安装包（Tauri bundle）
 cd src-tauri && cargo build --release
 # 产物：src-tauri/target/release/shared-lib-panel.exe
 ```
