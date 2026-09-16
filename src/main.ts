@@ -1927,25 +1927,102 @@ export const LIBRARY_RECORD_REQUIREMENT = [
   `   ★ 建卡时把**验收标准写成判据**（这是最该花心思的一步，也是这条门禁的前提）：`,
   `     file_exists:<路径> / no_placeholders:<路径> / grep_absent:<路径>::<文本> /`,
   `     sha256:<路径>::<摘要> / tests_pass:<命令> / endpoint_ok:<URL>`,
-  `     要点：把**具体路径 / 具体命令 / 具体 URL** 写出来 ——`,
-  `     "测试全部通过"没用（不知道跑什么）→ "测试 npm test 全部通过"才行；`,
-  `     "结论回写文档"没用 → "结论回写 docs/xxx.md"才行。`,
-  `     ⚠ 别指望自动转换：实测全库 176 条验收标准自动提判据**只提出 9 条**（5%），`,
-  `       全是"提到了某个具体文件"那类 —— 模糊的话里没有可判定的东西。`,
+  `     要点：把**具体路径 / 具体命令 / 具体 URL** 写出来 —— 不写会生成一条模糊的`,
+  `     默认验收标准，判不了，平台也就拦不住假 done。`,
+  `     ⚠ 别指望自动转换：实测全库 176 条验收标准自动提判据**只提出 9 条**（5%）。`,
   ``,
   `   ⚠ 无论建不建卡：**发现了但没做的活，必须写进检查点的 not_done**。`,
   `     那是它传到下一个会话的唯一通道 —— 面板不显示检查点，不写就等于丢了。`,
   ``,
-  `   建卡的门禁（照抄即可）：`,
-  `     · 计划没锁 → 直接 project_task_create(project=…, task_key=…, title=…, description=…)`,
-  `       （注意：bootstrap 出来的新项目初始都是**锁着的**，所以第一次多半要走下面的提案路径；`,
-  `       走完一次复核就解锁，之后就能直接建了。）`,
-  `     · 若报 "initial plan is locked" → 只能提案：project_plan_propose(project=…, reason=…,`,
-  `       changes=[{operation:"add_task", task_key:…, title:…, description:…}]) 然后**请用户或另一个会话**审批`,
-  `       （规则：提议者不能审自己 —— 需要另一个会话或用户来批；project_plan_review 本身可用）。`,
+  `   建卡门禁（计划锁着怎么走提案、谁来批）→ 点项目卡上的「拆任务」按钮，`,
+  `   那里有完整实测过的步骤和三个硬规则。这里不重复。`,
   ``,
   `想让面板动，必须动**任务本身**（状态 / 说明 / 下一步）—— 面板读的是它。`,
   `完整机制（含各种门禁和报错原因）见 D:\\codex-memory\\README.md 和各项目 AGENTS.md。`,
+].join('\n')
+
+/* ============ 开一个新项目（右上角按钮复制的就是它）============
+ *
+ * 为什么必须有这一块（2026-09-16 加）：
+ * 面板上原有的四个复制块**全是"项目卡上的按钮"** —— 而新项目在面板上
+ * 还没有卡，一个都点不到。于是"从零建一个项目"这件事**没有任何地方说过**。
+ * 放在右上角这一排（不挂项目卡）正是因为：它不属于任何已有项目。
+ *
+ * 内容全部来自实测（建了 6 个探针项目，全部清理）：
+ *   · bootstrap 的必填字段：缺一个就报错，报错会说明缺哪个
+ *   · ★ tasks 是**必填**：tasks=[] 和不传都报
+ *       "project_bootstrap requires at least one planned task"
+ *   · ★ 建出来就是**锁着**的（plan_locked=True），之后 project_task_create 被拒
+ *   · ★ 批准**一次**提案就**永久解锁**（代码 L896；实测批准后 plan_locked=False）
+ *   · 提案的审批者必须**属于同一个项目**，且**不能是提议者本人**
+ *   · 不给 contract 会**自动生成**一条模糊的验收标准
+ *       {"objective": 标题, "acceptance": ["完成可验证交付物并留下检查点"]}
+ *       —— 等于没有判据，平台就拦不住假 done
+ */
+export const NEW_PROJECT_START = [
+  `【开一个新项目】`,
+  ``,
+  `  你要从零建一个项目。**按这个顺序做，★ 是容易踩的坑。**`,
+  ``,
+  `★ 0) 先把"要做什么"想清楚 —— 尤其是**第一批任务**。`,
+  `     为什么：project_bootstrap **要求至少一个任务**（实测 tasks=[] 和不传都报`,
+  `       "requires at least one planned task"），而且它会**一次性**把项目、`,
+  `       初始任务、合同、Git 基线一起建好。`,
+  `     更关键的是：建出来的项目**是锁着的**（plan_locked=true）。`,
+  `       锁着的时候 project_task_create 会被拒：`,
+  `         "This project's initial plan is locked; use an explicit coordinator/human plan-change path"`,
+  `       想加任务只能走提案，而**提议者不能审自己的提案** ——`,
+  `       得另一个会话或人来批。（批准**一次**就**永久解锁**，之后直接建。）`,
+  `     → 所以：**能现在想到的活，都写进 tasks**，别留到建完再加。`,
+  ``,
+  `  1) 建项目`,
+  `     project_bootstrap(`,
+  `         project_key="<短横线小写，如 my-thing>",     # 必填，之后到处用它`,
+  `         name="<人看得懂的名字>",                    # 必填`,
+  `         scope="<一句话：做什么、给谁用、最终形态>",   # 必填`,
+  `         session_id="<你的会话 id>",                 # 必填`,
+  `         provider="<你的 provider>", model="<你的 model>",`,
+  `         root_path="<这个项目的代码目录绝对路径>",     # ★ 一定要给`,
+  `         kind="code",                                # code / data / doc …`,
+  `         tasks=[`,
+  `             {task_key:"<短横线小写>", title:"<做什么>",`,
+  `              description:"<验收标准，★ 尽量写成判据>",`,
+  `              contract:{objective:"…", acceptance:["file_exists:<路径>"]}},`,
+  `         ])`,
+  ``,
+  `     ⚠ root_path 为什么一定要给：平台靠它把"目录"对应到"项目"`,
+  `       （project_for_path）。不给的话，以后新会话在项目目录里也说不出`,
+  `       自己属于哪个项目。实测库里就有 4 个项目没登记 root_path，认不出来。`,
+  ``,
+  `  2) ★ 验收标准写成**可判定的判据**（这一步最省事也最容易省掉）`,
+  `     file_exists:<路径> / no_placeholders:<路径> / grep_absent:<路径>::<文本> /`,
+  `     sha256:<路径>::<摘要> / tests_pass:<命令> / endpoint_ok:<URL>`,
+  `     · 为什么：**平台会按判据拦 done** —— 合同里有判据而判据没过时，`,
+  `       标 done 会被直接拒绝。判据就是你（和以后的会话）那道门。`,
+  `     · 不给 contract 会**自动生成**一条模糊的：`,
+  `         {"objective": "<标题>", "acceptance": ["完成可验证交付物并留下检查点"]}`,
+  `       —— 这条谁都判不了，等于平台拦不住假 done。`,
+  `     · 要点：把**具体路径 / 具体命令 / 具体 URL** 写出来。`,
+  `         "功能可用" 没用（没法判）→ "测试 npm test 全部通过" 才行；`,
+  `         "结论回写文档" 没用 → "结论写进 docs/xxx.md" 才行。`,
+  `     · 实测：176 条模糊的验收标准里，机器只能提出 9 条判据（5%）——`,
+  `       所以**别指望事后补**，建的时候顺手写。`,
+  ``,
+  `  3) 建完确认一下，再开始干`,
+  `     project_overview(project="<key>")             # 项目图和最近事件`,
+  `     project_ready_tasks(project="<key>")          # 有哪些活可以领`,
+  `     project_task_dispatch(project="<key>", task_key="<任务的 key>")   # 领，拿到 id`,
+  `     project_context_pack(project="<key>", task_id=<id>, session_id=<你>)`,
+  `       —— 里面有**代码地图**（不用重读全仓库）和**别人留下的检查点**（踩过的坑）`,
+  ``,
+  `  4) 干完怎么记录进库 → 点右上角「怎么记录进共享库」那个按钮，照它做。`,
+  `     需要给项目加**新任务**（不是初始那批）→ 点项目卡上的「拆任务」按钮，`,
+  `       里面有"锁着怎么走提案、谁来批"的完整说明。`,
+  ``,
+  `  ⚠ 三个最容易犯的：`,
+  `     · tasks 留空 → 直接报错，建不出来（至少写一个）`,
+  `     · 不给 root_path → 以后按目录认不出这个项目`,
+  `     · 验收标准写成散文 → 平台拦不住假 done，等于这条门禁对你无效`,
 ].join('\n')
 
 const reqBtn = document.getElementById('reqBtn') as HTMLButtonElement | null
@@ -1966,6 +2043,32 @@ if (reqBtn) {
     reqBtn.innerHTML = '<svg class="tick" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
     setBotState('burst', clock)        /* ④ 粒子绽放：球替你确认一下 */
     setTimeout(() => { reqBtn.classList.remove('done'); reqBtn.innerHTML = old }, 1500)
+  })
+}
+
+/* ============ 右上角「开新项目」按钮 ============
+ *
+ * 和 reqBtn 一模一样的交互（按压果冻 + 成功变绿打勾 + 粒子绽放），
+ * 因为对用户来说这两个按钮是同一类动作：**复制一段说明给会话**。
+ * 不抽公共函数是因为 reqBtn 那边已经稳定跑通、且它俩是仅有的两处；
+ * 抽出来反而要动已经测过的代码 —— 当前更划算的是**照抄一份**。
+ */
+const newProjBtn = document.getElementById('newProjBtn') as HTMLButtonElement | null
+if (newProjBtn) {
+  newProjBtn.addEventListener('pointerdown', () => {
+    newProjBtn.classList.remove('press')
+    void newProjBtn.offsetWidth
+    newProjBtn.classList.add('press')
+    setTimeout(() => newProjBtn.classList.remove('press'), 340)
+  })
+  newProjBtn.addEventListener('click', async () => {
+    await copyText(NEW_PROJECT_START, '开一个新项目')
+    if (newProjBtn.classList.contains('done')) return
+    const old = newProjBtn.innerHTML
+    newProjBtn.classList.add('done')
+    newProjBtn.innerHTML = '<svg class="tick" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    setBotState('burst', clock)
+    setTimeout(() => { newProjBtn.classList.remove('done'); newProjBtn.innerHTML = old }, 1500)
   })
 }
 

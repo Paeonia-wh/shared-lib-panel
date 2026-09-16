@@ -1,0 +1,260 @@
+{
+  "_readme": [
+    "面板项目的代码地图（知识图谱）草稿，已逐文件核对过仓库真实代码。",
+    "",
+    "为什么是文件而不是直接入库：写 project_code_map_write 需要当前会话持有该项目一个 running/review 的任务，",
+    "而 create_task 工具在 DeepSeek 桥接里不可用；平台也不允许整图 replace（要求人工复核）。",
+    "所以先落成文件，任何会话（或 cortex）拿这份直接调 project_code_map_write 即可入库，不用重读仓库。",
+    "",
+    "入库方式：project_code_map_write(project='shared-lib-panel', nodes=..., edges=..., revision='<git HEAD 40 位 SHA>')",
+    "必须带 revision，否则 freshness 会是 unverified 而不是 fresh。",
+    "",
+    "核对时间：2026-09-15   核对基线：e483662252679de805b01f95a1fcf9b2cef1004e",
+    "（注：核对时又叠加了当日若干未提交改动：复制块改写、项目卡按钮、筛选条移除、unmet_deps 口径、构建戳）"
+  ],
+
+  "groups": {
+    "入口与构建": 0,
+    "面板业务": 1,
+    "球体引擎": 2
+  },
+
+  "nodes": [
+    {
+      "node_key": "index_html",
+      "kind": "frontend",
+      "label": "页面骨架",
+      "group_label": "入口与构建",
+      "group_order": 0,
+      "status": "done",
+      "paths": ["index.html"],
+      "responsibility": "面板的 DOM 骨架：小球容器 #ball、面板 #panel、列表 #list、统计 #stats、调色 #swatches、SVG 图标 symbol 表。标题旁有 #buildStamp 占位（构建时间戳由 build-front.mjs 写进 meta[name=panel-build] 后由 main.ts 读出显示）。不含任何逻辑。"
+    },
+    {
+      "node_key": "style_css",
+      "kind": "frontend",
+      "label": "样式与设计令牌",
+      "group_label": "入口与构建",
+      "group_order": 0,
+      "status": "done",
+      "paths": ["style.css", "dist/style.css"],
+      "responsibility": "全部样式。设计令牌在 :root：颜色只有近黑 --ink 一系 + 绿/蓝/黄三个语义色；圆角只留三档 --r-lg(18)/--r-md(10)/--r-sm(6)；字体 InterVariable。三条硬规则（反 AI 味设计定案）：卡片不靠阴影靠细线、状态用小圆点不做彩色胶囊、按钮一律幽灵态（白底细线，悬停翻黑）。注意 dist/style.css 是副本，由 build-front.mjs 刷新。"
+    },
+    {
+      "node_key": "build_front",
+      "kind": "frontend",
+      "label": "前端构建脚本",
+      "group_label": "入口与构建",
+      "group_order": 0,
+      "status": "done",
+      "paths": ["build-front.mjs", "package.json"],
+      "responsibility": "npm run front 的实现：用 esbuild 的 JS API 把 src/main.ts 打成 dist/bundle.js，往 dist/index.html 写入构建时间戳（meta[name=panel-build]），并把 index.html / style.css 刷进 dist（以前要手动复制，漏过）。不用 execFileSync 调 .bin——Windows 上正斜杠路径会被 cmd 拆错。"
+    },
+    {
+      "node_key": "tauri_conf",
+      "kind": "frontend",
+      "label": "外壳配置",
+      "group_label": "入口与构建",
+      "group_order": 0,
+      "status": "done",
+      "paths": ["src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/capabilities/default.json"],
+      "responsibility": "Tauri 2 外壳配置：无边框透明窗口（560×660、不可缩放、置顶、不进任务栏）、frontendDist 指向 ../dist。★关键：前端是编译时嵌进 exe 的，改完前端必须重新 cargo build，只跑 npm run front 再重启面板是无效的。"
+    },
+    {
+      "node_key": "main_ts",
+      "kind": "frontend",
+      "label": "面板主控与渲染",
+      "group_label": "面板业务",
+      "group_order": 1,
+      "status": "done",
+      "paths": ["src/main.ts"],
+      "responsibility": "前端主控（约 955 行）：拉数据（qdata/qtasks）、项目与任务两层视图、状态判定（projState/taskLabel）、复制块生成（任务接续块 / 项目现状简报 / 拆解指令）、排序（项目与任务都按紧急度）、统计条、调色盘、球体动画驱动、面板定位与转场。复制块是本面板的核心价值：库里有什么就带什么，库里没写就照实说没写，绝不编。"
+    },
+    {
+      "node_key": "tauri_ts",
+      "kind": "frontend",
+      "label": "Tauri 桥接",
+      "group_label": "面板业务",
+      "group_order": 1,
+      "status": "done",
+      "paths": ["src/tauri.ts"],
+      "responsibility": "前端与 Rust 的唯一通道：initTauri / expandWindow / collapseWindow / beginDrag / dragBy 的封装，以及 isTauri 判定（在浏览器里跑时降级用演示数据）。"
+    },
+    {
+      "node_key": "rust_main",
+      "kind": "backend",
+      "label": "Rust 后端与 IPC",
+      "group_label": "面板业务",
+      "group_order": 1,
+      "status": "done",
+      "paths": ["src-tauri/src/main.rs"],
+      "responsibility": "Tauri 后端（360 行）：直连 PostgreSQL 只读，暴露 qdata（项目汇总）与 qtasks（任务明细）两个命令；把 memoryd 的 SSE 事件流转发给前端（前端按指纹比对决定是否重绘）；系统托盘（显示/隐藏、开机自启、退出）；强制不进任务栏需用 Windows API 改 WS_EX_TOOLWINDOW + SetWindowPos（Tauri 的 set_skip_taskbar 会被窗口创建流程覆盖）。"
+    },
+    {
+      "node_key": "data_contract",
+      "kind": "frontend",
+      "label": "数据契约与口径",
+      "group_label": "面板业务",
+      "group_order": 1,
+      "status": "done",
+      "paths": ["src-tauri/src/main.rs", "src/main.ts"],
+      "responsibility": "两端共用的数据口径，改一边必须动另一边：ready = 库内 pending 且无主；doing = 有主且未完成；unmet_deps = 未完成的前置数（★只有它代表真的被卡住，用总依赖数 deps 会把前置全做完的任务永久误判为等待中）；task.status 能取 blocked 且要照实显示；未拆解项目显示「未拆解」而非 0/0。这些口径是逐项对账（audit.mjs）核出来的，不要随手改。"
+    },
+    {
+      "node_key": "engine",
+      "kind": "frontend",
+      "label": "渲染引擎主循环",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/engine.ts"],
+      "responsibility": "bloub 引擎移植的核心（518 行）：把「状态 + 时间」采样成一帧可渲染几何（bodyPath / arcs / eyes / dots / notif），并混合表情与视线。对外只暴露 sample(clock) 与 setState / setLook。"
+    },
+    {
+      "node_key": "repere",
+      "kind": "frontend",
+      "label": "坐标系定义",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/repere.ts"],
+      "responsibility": "引擎输出的坐标系定义（RAYON / DEMI_VIEWBOX）。engine.sample() 吐出来的坐标只有配合这两个常数才有意义——它们原本困在 Vue 组件的 <script setup> 里没法导出，被单独提出来。"
+    },
+    {
+      "node_key": "math",
+      "kind": "frontend",
+      "label": "数学与缓动",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/math.ts"],
+      "responsibility": "TAU / clamp / lerp、缓动函数集、确定性随机 createRng、循环噪声 loopNoise。引擎里所有随机都从这里来，所以同一时刻的画面可复现。"
+    },
+    {
+      "node_key": "profiles",
+      "kind": "frontend",
+      "label": "径向轮廓数据",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/profiles.ts"],
+      "responsibility": "从参考视频逐像素量出来的径向轮廓 r(theta) 采样表（64 点，单位 = 静止半径 1）。由 tools/extract-profiles.py 生成，不要手改。"
+    },
+    {
+      "node_key": "shape",
+      "kind": "frontend",
+      "label": "形体构造与变形",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/shape.ts"],
+      "responsibility": "由径向轮廓生成可渲染形体：普通多边形、超椭圆、圆并集、圆凸包等轮廓构造，以及形变插值。负责回答「球被拉成什么形状」。"
+    },
+    {
+      "node_key": "skins",
+      "kind": "frontend",
+      "label": "配色与皮肤",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/skins.ts"],
+      "responsibility": "12 色配色表与 mixHex 混色；把配色与形体组合成「皮肤」。面板顶部调色盘就是它的消费方，选中的颜色记在 localStorage。"
+    },
+    {
+      "node_key": "decor",
+      "kind": "frontend",
+      "label": "描边、渐变与粒子",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/decor.ts"],
+      "responsibility": "装饰层：沿轨迹的渐变描边（色相环，实测 S 45-62% / L 50-67%）与散布粒子点。决定球的「3D 质感与光泽」。"
+    },
+    {
+      "node_key": "eyefit",
+      "kind": "frontend",
+      "label": "眼睛贴合边缘",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/eyefit.ts"],
+      "responsibility": "把眼睛贴到不规则形体上（426 行）：按局部半径比例定位眼中心，并反算眼边缘到轮廓的安全余量。不做这一步，窄方向的眼会被轮廓切掉、看起来像缺口。"
+    },
+    {
+      "node_key": "face",
+      "kind": "frontend",
+      "label": "面部与眨眼",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/face.ts"],
+      "responsibility": "眼睛是画在球面上的而不是平铺：按 z 深度缩放远处的眼（实测近 0.69×），并负责眨眼缩放与「活泼度」。"
+    },
+    {
+      "node_key": "expressions",
+      "kind": "frontend",
+      "label": "表情混合",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/expressions.ts"],
+      "responsibility": "在静止表情与目标表情之间插值（两片胶囊形一共四个控制杆：宽度、间距、高度、注视点）。"
+    },
+    {
+      "node_key": "states",
+      "kind": "frontend",
+      "label": "状态机定义",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/states.ts"],
+      "responsibility": "全部状态的定义与参数（582 行）：idle / wink / orbit / burst 等，以及每个状态在时间轴上的行为。纯数据，不含时钟、不依赖框架。"
+    },
+    {
+      "node_key": "cycles",
+      "kind": "frontend",
+      "label": "动作序列",
+      "group_label": "球体引擎",
+      "group_order": 2,
+      "status": "done",
+      "paths": ["src/bot/cycles.ts"],
+      "responsibility": "把状态编成「动作序列」（一段段状态 + 各自时长）——相当于引擎的剪辑台。刻意保持纯数据、无时钟、无框架依赖，测试与时间轴才能复用同一份定义。"
+    }
+  ],
+
+  "edges": [
+    { "from_key": "index_html", "to_key": "style_css",   "label": "引用样式",       "variant": "default" },
+    { "from_key": "index_html", "to_key": "build_front", "label": "作为构建输入",   "variant": "default" },
+    { "from_key": "build_front", "to_key": "main_ts",    "label": "打包入口",       "variant": "default" },
+    { "from_key": "tauri_conf", "to_key": "build_front", "label": "指定前端产物目录", "variant": "default" },
+
+    { "from_key": "main_ts", "to_key": "tauri_ts",      "label": "调 IPC 封装",     "variant": "default" },
+    { "from_key": "main_ts", "to_key": "rust_main",     "label": "调 qdata / qtasks", "variant": "default" },
+    { "from_key": "main_ts", "to_key": "engine",        "label": "每帧驱动",        "variant": "default" },
+    { "from_key": "main_ts", "to_key": "skins",         "label": "取色与换肤",      "variant": "default" },
+    { "from_key": "main_ts", "to_key": "cycles",        "label": "编排入场/动作",   "variant": "default" },
+    { "from_key": "rust_main", "to_key": "data_contract", "label": "遵守口径",      "variant": "default" },
+    { "from_key": "main_ts",   "to_key": "data_contract", "label": "遵守口径",      "variant": "default" },
+
+    { "from_key": "engine", "to_key": "repere",      "label": "输出坐标依据",   "variant": "default" },
+    { "from_key": "engine", "to_key": "math",        "label": "用数学与缓动",   "variant": "default" },
+    { "from_key": "engine", "to_key": "shape",       "label": "取形体",         "variant": "default" },
+    { "from_key": "engine", "to_key": "decor",       "label": "取描边与渐变",   "variant": "default" },
+    { "from_key": "engine", "to_key": "eyefit",      "label": "贴眼到轮廓",     "variant": "default" },
+    { "from_key": "engine", "to_key": "face",        "label": "取眼部几何",     "variant": "default" },
+    { "from_key": "engine", "to_key": "expressions", "label": "混合表情",       "variant": "default" },
+    { "from_key": "engine", "to_key": "states",      "label": "读状态定义",     "variant": "default" },
+
+    { "from_key": "cycles", "to_key": "states",  "label": "引用状态",     "variant": "default" },
+    { "from_key": "states", "to_key": "shape",   "label": "取轮廓",       "variant": "default" },
+    { "from_key": "states", "to_key": "decor",   "label": "取装饰参数",   "variant": "default" },
+    { "from_key": "shape",  "to_key": "profiles","label": "读轮廓采样",   "variant": "default" },
+    { "from_key": "shape",  "to_key": "math",    "label": "用数学",       "variant": "default" },
+    { "from_key": "skins",  "to_key": "shape",   "label": "组合形体",     "variant": "default" },
+    { "from_key": "skins",  "to_key": "profiles","label": "读采样数",     "variant": "default" },
+    { "from_key": "decor",  "to_key": "math",    "label": "用数学与随机", "variant": "default" },
+    { "from_key": "eyefit", "to_key": "shape",   "label": "读局部半径",   "variant": "default" },
+    { "from_key": "face",   "to_key": "math",    "label": "用数学与噪声", "variant": "default" },
+    { "from_key": "expressions", "to_key": "face", "label": "读眼部常量", "variant": "default" }
+  ]
+}
