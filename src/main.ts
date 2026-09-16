@@ -660,6 +660,14 @@ export const __botPerfProbe = () => ({
 export const __botPerfSpecs = () => PERF.map((p) => ({ id: p.id, hold: p.hold, frame: p.frame }))
 export const __botPerfTick = (now: number) => tickPerform(now)
 
+/** 截图生成器用：出一帧**真球**的 SVG 内容（idle 状态）。
+    为什么需要：README 的截图里要有那颗球，而它是引擎画的 ——
+    手抄一份 SVG 必然和引擎漂移，所以直接调真引擎 + 真 `frameMarkup`。 */
+export const __mockBallFrame = (t = 1.2) => {
+  const e = new BotEngine(R, 'idle', null, null)
+  return frameMarkup(e.sample(t), curInk())
+}
+
 let shapeNextAt = 0            // 下一次换形状
 let colorNextAt = 0            // 下一次换色
 let inkShapeId: string = DEFAULT_SHAPE
@@ -2011,7 +2019,9 @@ export function projCard(p: Proj): string {
     ${acts}
   </div>`
 }
-function taskCard(p: Proj, t: Task, i = 0): string {
+/* 导出只为「截图生成器」能复用真卡片结构（`gen-mock-shots.cjs`）——
+   截图要用真类名真结构，手抄一份必然会和代码漂移。导出不改行为。 */
+export function taskCard(p: Proj, t: Task, i = 0): string {
   const st = taskLabel(t)
   return `
   <div class="tcard" style="animation-delay:${i * 45}ms">

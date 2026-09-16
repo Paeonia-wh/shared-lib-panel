@@ -4344,6 +4344,10 @@
   });
   var __botPerfSpecs = () => PERF.map((p) => ({ id: p.id, hold: p.hold, frame: p.frame }));
   var __botPerfTick = (now) => tickPerform(now);
+  var __mockBallFrame = (t = 1.2) => {
+    const e = new BotEngine(R2, "idle", null, null);
+    return frameMarkup(e.sample(t), curInk());
+  };
   var shapeNextAt = 0;
   var colorNextAt = 0;
   var inkShapeId = DEFAULT_SHAPE;

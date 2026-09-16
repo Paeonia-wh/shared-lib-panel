@@ -10,7 +10,7 @@
 ---
 
 **English** — A minimal, **read-only** floating-ball panel that shows the progress of projects coordinated by
-multiple AI agents. It sits on your desktop as a draggable orb (right-top corner by default), and expands into a
+multiple AI agents. It sits on your desktop as a draggable orb (top-right corner by default), and expands into a
 compact card list: *project name · status · done/total · task squares*. Click a task to copy a ready-to-paste
 handoff prompt; paste it into any agent (DeepSeek Harness, Codex, …) and the agent picks up the work, writes its
 results back to the shared library, and the panel updates itself in real time via SSE.
@@ -22,6 +22,10 @@ frontend. Requires the [codex-memory](https://github.com/Paeonia-wh/codex-memory
 ![只有一颗球](docs/01-ball-only.png)
 <p align="center"><sub>开机后桌面上只有一颗球 · 点它才展开</sub></p>
 
+> ℹ️ 图里的卡片是**用面板自己的渲染函数 + 自己的样式表**画出来的
+> （`projCard()` / `taskCard()` / 真引擎出的那颗球），**项目数据是编的**（不是真项目）。
+> 皮肤、结构、字号就是你能跑出来的样子。
+
 ---
 
 ## 全景：它是怎么跑起来的
@@ -29,7 +33,7 @@ frontend. Requires the [codex-memory](https://github.com/Paeonia-wh/codex-memory
 ```mermaid
 flowchart TB
     subgraph 人["你（人）"]
-        P[悬浮球面板<br/>右下角一颗球]
+        P[悬浮球面板<br/>右上角一颗球]
     end
 
     subgraph AI["AI 会话们（DSH / Codex / 任意 agent）"]
@@ -108,6 +112,21 @@ sequenceDiagram
 
 **只有这些信息**。知识图谱、踩过的坑、决策记录、交接——那些都是**给 AI 读的**，面板不显示。
 
+### 角落那颗球本身也会说话
+
+球不只是个按钮。它有三条互不打扰的"神经"：
+
+| | 什么时候动 | 怎么动 |
+|---|---|---|
+| **① 库里有动静** | 别的会话领了活 / 发了产出 / 把任务标完 / 计划被驳回 | 蓝点、睁大眼、感叹号（**只对值得看的事件反应**，分三档 + 冷却限流） |
+| **② 库里的整体状况** | 有活在推进 / 有卡住的 / 全闲 | 呼吸和视线的**幅度**跟着变（警觉 / 正常 / 打盹）—— 颜色仍是纯随机 |
+| **③ 你没事干** | 空闲约 20 秒 / 40 秒 | 荡秋千、蹦一下、原地转两个圈（**不打扰**：你鼠标一靠近它就停） |
+
+球还会自己眨眼、歪头、变形状（形状 25~50 秒、颜色 4~10 秒随机轮换）。
+
+> **物理边界**：球只有 54px 且钉在右上角（向上只有 22px 余量），
+> 所以"蹦"靠**压扁+拉伸**骗眼睛、不靠大位移 —— 它不会跑出自己的位置。
+
 ---
 
 ## 快速开始
@@ -115,7 +134,9 @@ sequenceDiagram
 ```bash
 # 1) 先跑起共享项目库（另一个仓库）
 git clone https://github.com/Paeonia-wh/codex-memory.git
-cd codex-memory/repo && ./scripts/start-services.ps1
+cd codex-memory/repo
+./scripts/start-memoryd-silent.ps1     # 起 PostgreSQL + memoryd
+#    ⚠ 不要用 start-services.ps1 —— 它**已废弃**（会弹终端窗口 + 传参不对会静默失败）
 #    详细步骤见：https://github.com/Paeonia-wh/codex-memory/blob/main/docs/SETUP.md
 
 # 2) 再跑这个面板
@@ -143,11 +164,19 @@ cd src-tauri && cargo build --release
 
 ## 特性
 
-- **悬浮球**：`bloub` 引擎驱动（会眨眼、视线跟着鼠标、可拖动）；开机自启、不占任务栏、空白处鼠标穿透
+- **悬浮球**：`bloub` 引擎驱动（眨眼、视线跟着鼠标、可拖动、自己变形状换颜色）；
+  开机自启、不占任务栏、空白处鼠标穿透
 - **实时**：PostgreSQL 触发器 → memoryd SSE → 面板毫秒级刷新（带指纹比对，数据没变不重绘）
 - **任务格**：一个方块 = 一个任务，颜色 = 状态，一眼看出分布
 - **接续块**：任务级指令，含 `task_key`，粘给任意 AI 都能精确接上
-- **不打扰**：未拆解的项目给「让 AI 拆任务」指令；已完成的安静待着
+- **球会说话**：库里发生事它动一下；整体状况变了它的呼吸/视线跟着变（见上面「角落那颗球本身也会说话」）
+- **右上角两个按钮**：「开始一个新东西」（复制"先讨论清楚再建项目"的做法）、
+  「怎么记录进共享库」（复制记录要求）
+- **不打扰**：未拆解的项目给「让 AI 拆任务」指令；已完成的安静待着；
+  你看面板或鼠标靠近球的时候，球不表演
+
+> 另有一个**独立的**计划审批面板（`scripts/project_review_panel.py`，跑在 codex-memory 那侧）：
+> 浏览器里点「批准/拒绝」计划提案。它和本面板（Tauri）是两个东西，本面板依然**只读**。
 
 ---
 
