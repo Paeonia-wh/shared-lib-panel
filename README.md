@@ -133,9 +133,20 @@ sequenceDiagram
 
 ### 路线 A · 只想用（**推荐**，不装任何编译工具）
 
-> ⚠️ **注意：现在还没有发布编译好的安装包**（GitHub Releases 是空的），
-> 所以这条路暂时走不通 —— 想要的话开个 issue 催一下，或者走路线 B。
-> 一旦有 release，这里会变成"下载 → 双击"。
+**[⬇ 下载 shared-lib-panel.exe（8.1 MB）](https://github.com/Paeonia-wh/shared-lib-panel/releases/download/v0.10/shared-lib-panel.exe)**
+—— 双击即可运行。
+
+> **但这只是前端。** 面板读的是 [codex-memory](https://github.com/Paeonia-wh/codex-memory)
+> 那个项目库，所以**要先把后端跑起来**（否则面板打开是空的）：
+>
+> ```powershell
+> git clone https://github.com/Paeonia-wh/codex-memory.git D:\codex-memory\repo
+> cd D:\codex-memory\repo
+> .\scripts\bootstrap.ps1 -Minimal      # 精简档 ~2GB（够用）
+> .\scripts\start-memoryd-silent.ps1    # 起 PostgreSQL + memoryd
+> ```
+>
+> 运行要求：Windows 10/11 · WebView2 运行时（Win10/11 通常自带）· 后端在跑。
 
 ### 路线 B · 从源码跑
 
@@ -149,6 +160,7 @@ sequenceDiagram
 
 **那个 VS Build Tools 是整条链上最大的一块（5~7GB）**，而它只是 Rust 编译 C++ 依赖用的。
 **如果你只是想改界面看看效果，用 `npm run dev` 就够了，不用装 Rust。**
+（只想用的话更简单 —— 走上面的路线 A，下载 exe 就行。）
 
 ```bash
 # 1) 先跑起共享项目库（另一个仓库）
