@@ -1105,6 +1105,48 @@ function applyProjects(list: any[]): void {
   if (view.kind === 'tasks') renderTasks(view.proj); else renderProjects()
 }
 
+/**
+ * 后端任务状态 → 面板的显示状态。
+ *
+ * ★ 抽成独立函数（2026-09-16）：原来这段逻辑**内联在 `loadTasks` 里**，
+ * 于是它**测不到** —— 而它正是「面板和库对不上」这类 bug 的频发地
+ * （用户报过两次：`blocked` 被降级、`running`/`review` 没分支）。
+ * 抽出来之后可以喂合成数据直接测。
+ *
+ * ⚠ **分支顺序是语义的一部分**，别随手重排（下面每条都标了为什么）。
+ */
+export function mapTaskStatus(t: any): TaskStatus {
+  if (t.status === 'done') return 'done'
+  if (t.status === 'failed' || t.status === 'cancelled') return 'blocked'
+  if (t.status === 'running') return 'doing'
+  if (t.status === 'review') return 'review'
+  /* ★ "blocked 且占用者还活着"必须先判。
+     用户 2026-09-16 报的「六桶相加 15 ≠ 任务总数 16」+「卡住数 1 ≠ 后端 0」就是这个：
+     原来这一支排在下面那句 `blocked ? 'blocked'` **后面**，
+     于是 `ownerAlive && owner ? 'doing'` **永远够不到 blocked 的任务**
+     → 同一个任务两套说法（明细徽章「等待中」、统计说「在做」）。
+     而这**不只是显示问题** —— Rust 的 bucket 里「blocked 且占用者心跳还新」
+     **两个桶都不要它**（doing 只收 running/pending、stuck 排除了有活认领的），
+     所以六桶相加真的比 total 少 1，那个任务从统计里"凭空消失"。
+     现在两边同一口径：
+       · blocked + 占用者心跳还新（2 小时内） → 还在弄 → doing
+       · blocked + 占用者早没了               → 真卡住 → blocked */
+  if (t.status === 'blocked' && t.owner_alive === true && t.owner) return 'doing'
+  /* 库里显式标了 blocked 就照实显示（2026-09-15 对账发现：
+     以前没有这个分支，blocked 会被降级成「进行中」或「待开始」，
+     和共享库里写的对不上）。 */
+  if (t.status === 'blocked') return 'blocked'
+  /* 有主 ≠ 在做（2026-09-15 用户报的 bug）。
+     原来只看 owner 是否为空，于是 rural-1-39 里一个**23 小时前**被占住的 blocked 任务
+     让整个项目显示「进行中」，而当天真正在干活的 kstage 显示「待开始」—— 完全反了。
+     而它只清 status='running' 且租约过期的，blocked+无租约的永远清不掉，
+     所以面板必须自己看心跳：owner 还活着才算 doing，否则按 blocked/ready 算。 */
+  if (t.owner_alive === true && t.owner) return 'doing'
+  /* 只有"未完成的前置"才算被卡住。以前用 deps（总前置数），
+     导致前置全做完的任务永远显示成等待中。 */
+  return t.unmet_deps > 0 ? 'blocked' : 'ready'
+}
+
 export async function loadTasks(key: string): Promise<void> {
   const p = byKey(key)
   if (!p || p.fromDb || !isTauri) return
@@ -1114,36 +1156,7 @@ export async function loadTasks(key: string): Promise<void> {
     p.tasks = rows.map((t: any) => ({
       key: t.key,
       title: t.title || t.key,
-      status: t.status === 'done' ? 'done'
-        : t.status === 'failed' || t.status === 'cancelled' ? 'blocked'
-        /* 库里显式标了 blocked 就照实显示（2026-09-15 对账发现：
-           以前没有这个分支，blocked 会被降级成「进行中」或「待开始」，
-           和共享库里写的对不上）。 */
-        : t.status === 'blocked' ? 'blocked'
-        /* 只有"未完成的前置"才算被卡住。
-           以前用 deps（总前置数），导致前置全做完的任务永远显示成等待中
-           —— 对账发现 cross-consistency 的 5 个前置全 done 了还被标卡住。 */
-        /* 平台白名单里 status 还可以是 running 和 review，这两个原来都没有分支
-         （和之前 blocked 被降级是同一个毛病）：
-         running = 明确在做 → 进行中，不管有没有主（标了 running 说明有人在推）
-         review  = 待验收 → 单独一档 */
-      : t.status === 'running' ? 'doing'
-      : t.status === 'review' ? 'review'
-      /* 库里**显式标了 blocked** 就是等待中 —— 不管有没有未完成的前置。
-         （2026-09-15 统一口径：后端 failed 桶的判据就是 status IN ('blocked','failed','cancelled')，
-         前端如果只在"有未完成前置"时才显示 blocked，两边就会对不上 ——
-         实测 rural-1-39 的 deploy-frontend-three-ends 就是这样差 1 个。
-         那个任务库里标 blocked 但没有未完成前置，说明卡在外部原因（等客户/等资质），
-         statusLine 会如实说"库里标了 blocked"，不编"卡在谁"。） */
-      : t.status === 'blocked' ? 'blocked'
-      /* 有主 ≠ 在做（2026-09-15 用户报的 bug）。
-         原来只看 owner 是否为空，于是 rural-1-39 里一个**23 小时前**被占住的 blocked 任务
-         让整个项目显示「进行中」，而当天真正在干活的 kstage 显示「待开始」—— 完全反了。
-         平台自己是用租约/心跳判断认领还有没有效的（reap_expired_leases），
-         而且它只清 status='running' 且租约过期的，blocked+无租约的永远清不掉，
-         所以面板必须自己看心跳：owner 还活着才算 doing，否则按 blocked/ready 算。 */
-      : (t.ownerAlive && t.owner ? 'doing' : (t.unmet_deps > 0 ? 'blocked' : 'ready')),
-      raw: t.status,
+      status: mapTaskStatus(t),
       pri: typeof t.priority === 'number' ? t.priority : 9,
       owner: t.owner ? String(t.owner).replace(/^session-/, '').slice(0, 12) : undefined,
       ownerAlive: t.owner_alive === true,

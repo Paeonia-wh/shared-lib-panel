@@ -356,9 +356,22 @@ async fn qdata() -> Result<String, String> {
                        count(*)::int AS total,
                        count(*) FILTER (WHERE t.status = 'done')::int AS done,
                        /* 在做 = 标了 running 的，或有主且占用者心跳还新（2 小时内）的。
-                          有主≠在做：陈旧的认领（占用者早没了）不该算。 */
+                          有主≠在做：陈旧的认领（占用者早没了）不该算。
+
+                          ★ 2026-09-16 修：**补上 status='blocked' 这一支**。
+                          原来只覆盖 running 和 pending，于是
+                          「blocked 且占用者心跳还新」的任务**掉进缝里**：
+                            · doing 不要它（status 不是 running / pending）
+                            · stuck 也不要它（下面那句排除了"有活认领的"）
+                          → 六桶相加比 total 少 1。实测 kstage：
+                            total=16，而 done+doing+review+ready+held+stuck = 15，
+                            用户截图报「六桶相加 15 ≠ 任务总数 16」。
+                          这正是下面 ready 那句注释警告过的病（"凭空消失"）——
+                          当时修了 pending 那一支，**漏了 blocked 这一支**。
+                          语义上也对：会话正自称 working、心跳还新，它就是在做，
+                          只是它自己把任务标成了 blocked（卡住了但还在弄）。 */
                        count(*) FILTER (WHERE t.status = 'running'
-                                          OR (t.status = 'pending' AND os.id IS NOT NULL
+                                          OR (t.status IN ('pending','blocked') AND os.id IS NOT NULL
                                               AND os.last_heartbeat IS NOT NULL
                                               AND os.last_heartbeat > now() - interval '2 hours'))::int AS doing,
                        /* ---- liveness / progress 双租约（2026-09-15 加）----

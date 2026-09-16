@@ -4703,6 +4703,16 @@
     if (view.kind === "tasks") renderTasks(view.proj);
     else renderProjects();
   }
+  function mapTaskStatus(t) {
+    if (t.status === "done") return "done";
+    if (t.status === "failed" || t.status === "cancelled") return "blocked";
+    if (t.status === "running") return "doing";
+    if (t.status === "review") return "review";
+    if (t.status === "blocked" && t.owner_alive === true && t.owner) return "doing";
+    if (t.status === "blocked") return "blocked";
+    if (t.owner_alive === true && t.owner) return "doing";
+    return t.unmet_deps > 0 ? "blocked" : "ready";
+  }
   async function loadTasks(key) {
     const p = byKey(key);
     if (!p || p.fromDb || !isTauri) return;
@@ -4712,8 +4722,7 @@
       p.tasks = rows.map((t) => ({
         key: t.key,
         title: t.title || t.key,
-        status: t.status === "done" ? "done" : t.status === "failed" || t.status === "cancelled" ? "blocked" : t.status === "blocked" ? "blocked" : t.status === "running" ? "doing" : t.status === "review" ? "review" : t.status === "blocked" ? "blocked" : t.ownerAlive && t.owner ? "doing" : t.unmet_deps > 0 ? "blocked" : "ready",
-        raw: t.status,
+        status: mapTaskStatus(t),
         pri: typeof t.priority === "number" ? t.priority : 9,
         owner: t.owner ? String(t.owner).replace(/^session-/, "").slice(0, 12) : void 0,
         ownerAlive: t.owner_alive === true,
