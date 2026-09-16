@@ -1507,6 +1507,24 @@ function beatText(min?: number): string {
   return `${Math.floor(h / 24)} 天`
 }
 
+/* ⚠ 2026-09-17 加：判断"这份合同够不够动手"。
+   为什么要它（用户提的需求："让会话不能直接动手，得先问清楚了"）：
+   实测库里**绝大多数任务没有可判定的验收判据**（平台自己的代码注释里写着
+   "51 个有合同的任务里，含可判定判据的 = 0 个"）。而判据决定两件事：
+     · 会话知不知道"做到什么算完"
+     · 对账时平台能不能自动跑判据（不能跑就只能"读一遍说通过"）
+   所以：**没有可判定判据 = 这活还没定清楚 = 先问用户，别闷头开工。**
+   这比加一句"请先确认需求"有用 —— 它有个**具体的判据**，不是空话。 */
+const PREDICATE_RE = /^(file_exists|grep_absent|grep_present|tests_pass|command_ok|json_has|http_ok):/i
+
+function contractGaps(raw: string | undefined): { hasGoal: boolean; mechanical: number } {
+  const c = parseContract(raw || '')
+  return {
+    hasGoal: !!c.goal.trim(),
+    mechanical: c.acceptance.filter((a) => PREDICATE_RE.test(a.trim())).length,
+  }
+}
+
 export function projBlock(p: Proj, t?: Task): string {
   const info = projInfo(p)
 
@@ -1578,6 +1596,36 @@ export function projBlock(p: Proj, t?: Task): string {
     if (t.nextAct) {
       body.push('')
       body.push(`上一步留下的交代：${t.nextAct}`)
+    }
+
+    /* ★ 动手前的门（2026-09-17 加，用户要求："让会话不能直接动手，得先问清楚了"）。
+       为什么用"合同够不够"当判据、而不是写一句空的"请先确认需求"：
+       空话没人会照做；而"有没有可判定的验收判据"是**能查的事实** ——
+       实测平台自己的注释里就写着「51 个有合同的任务里，含可判定判据的 = 0 个」。
+       判据缺失不只是"不够严谨"，它有两个具体后果：
+         · 会话不知道做到什么算完 → 会自己编一个标准
+         · 对账时平台跑不了判据 → 只能"读一遍说通过"
+       所以这一档明确要求：**先跟用户把验收标准定下来，再动手。** */
+    if (!isDone) {
+      const gap = contractGaps(t.contract)
+      body.push('')
+      if (!gap.hasGoal && gap.mechanical === 0) {
+        body.push('⚠ **先别动手 —— 这个任务的要求还没定清楚。**')
+        body.push('  现在合同里既没有"目标"，也没有一条可判定的验收判据。')
+        body.push('  你要做的第一件事是**跟用户把这两样问清楚**：')
+        body.push('    · 这件事做成什么样算完？（一句话的目标）')
+        body.push('    · 拿什么证明它完了？（最好是机器能查的，比如 file_exists:<路径> / tests_pass:<命令>）')
+        body.push('  定下来之后：用 project_task_contract 把合同补上，再开工。')
+        body.push('  ⚠ 别自己编一个标准就闷头做 —— 那等于把"做完了"的定义交给你自己，')
+        body.push('    后面没人能验收（对账时会变成"读一遍说通过"）。')
+      } else if (gap.mechanical === 0) {
+        body.push('⚠ **动手前先确认验收标准**：合同里有目标，但**没有一条机器能查的判据**。')
+        body.push('  现在的验收只能靠人读一遍 —— 而"读一遍"最容易漏。')
+        body.push('  · 如果这件事**本来就能机器验**（文件在不在、测试过不过）→ 先问用户能不能加一条')
+        body.push('    （形如 file_exists:<路径> / tests_pass:<命令>），然后用 project_task_contract 补上。')
+        body.push('  · 如果确实只能人看（设计稿、文案）→ 那就是这样，继续做，')
+        body.push('    但收尾时把"人该看什么"写进检查点，别只说"做完了"。')
+      }
     }
 
     /* blocked 要分开说（2026-09-15 修）。
@@ -1667,23 +1715,35 @@ export function projBlock(p: Proj, t?: Task): string {
        这个任务自己的 id 怎么拿 + 指路。
        （合同 / 检查点 / 依赖 / 状态 那些块特有数据在上面，不动。） */
     body.push('')
-    body.push('★ 怎么做这件事（领活 → 读上下文 → 收尾）在这份说明里：')
-    body.push('     D:\\codex-memory\\docs\\接手任务.md')
-    body.push('')
-    body.push(`  先做的事：project_task_dispatch(project="${p.key}", task_key="${t.key}")`)
+    body.push('★ 先做的事：')
+    body.push(`  project_task_dispatch(project="${p.key}", task_key="${t.key}")`)
     body.push('     ⚠ 它返回的 **id（32 位 uuid）才是后面所有工具要的 task_id** —— 不是上面那个 key。')
-    body.push('     后面接 project_context_pack(project=…, task_id=<那个 id>) 读上下文。')
+    body.push('     然后 project_context_pack(project=…, task_id=<那个 id>) 读上下文。')
     body.push('')
-    body.push('  ⚠ 两条最容易踩的（细节在文档里）：')
-    body.push('     · ★ **没做完的绝对不要标 done**（平台会按判据拦，改了要 project_task_reopen）。')
-    body.push('     · 收尾顺序别换：检查点五项 → 发产出 → preflight 验判据 → 标 done。')
+    body.push('  ⚠ 两条最容易踩的（**这两条这里就说全了，不用去看别处**）：')
+    body.push('     · ★ **没做完的绝对不要标 done** —— 平台会按合同里的判据拦（拦下来就重来一次）。')
+    body.push('       已经错标了要退回：project_task_reopen(task_id=<id>, reason="<为什么>")。')
+    body.push('     · 收尾顺序别换：**检查点五项 → 发产出 → preflight 验判据 → 标 done**。')
+    body.push('       产出要发真实存在的文件（只报路径不落地，对账会判 rejected）。')
+    /* ⚠ 2026-09-17 改：文档从**主干**降成**延伸阅读**（用户要求的"内容不自足"那条）。
+       原来写的是「★ 怎么做这件事在这份说明里：D:\codex-memory\docs\接手任务.md」——
+       而那个路径**可能不存在**：别人只下载了面板 exe、没把库装到 D:\codex-memory，
+       或者改过安装位置。主干挂在外部文件上，接手会话读不到就卡住。
+       现在：块自己把该做的说完了（上面那几条），文档只是"想更细再看"。 */
+    body.push('')
+    body.push('  （想更细的：D:\\codex-memory\\docs\\接手任务.md —— 完整流程、判据写法、各种边界。')
+    body.push('    那是标准安装位置；**打不开就忽略它，不影响你按上面做**。）')
 
     return body.join('\n')
   }
 
   /* 项目层：项目现状简报（多任务项目卡）+ 单任务项目卡 */
   const body: string[] = []
-  body.push(`【继续做 · ${p.name}】`)
+  /* ⚠ 2026-09-17 改（用户要求）：项目级抬头的措辞。
+     原来写「【继续做 · 项目名】」—— 但这一段并**没有指定某个任务**，
+     说"继续做"等于让会话自己去挑一个开工，而挑哪个该由用户定。
+     实测：这条块最容易的误用就是"拿起来就 dispatch 第一个待办"。 */
+  body.push(`【项目现状 · ${p.name}（${p.key}）】`)
   body.push(...info)
   body.push('')
   /* 进度行要说全。原来只列"已完成 / 待开始 / 在做"，于是会出现
@@ -1741,15 +1801,31 @@ export function projBlock(p: Proj, t?: Task): string {
     body.push(`其他状态 ${rest.length} 个：${rest.map((x) => `${x.key}（${x.status}）`).join('、')}`)
   }
   body.push('')
-  /* ⚠ 2026-09-16 大改：这段的通用流程（怎么看现状 / 怎么领活 / 怎么写判据）
-     现在在 docs\接手任务.md 里。块只留**这一刻特有**的：这是本项目的待办清单 + 指路。 */
+  /* ★ 2026-09-17 大改（用户要求）：这一段的任务从"派活"变成"汇报 + 问用户"。
+     为什么改：这一条块叫「现状简报」，用途是**让会话先看懂局面**，
+     而原来结尾直接给了 dispatch 的写法 —— 于是最自然的用法变成
+     "会话读完就自己去认领一个任务开工"。但：
+       · 先干哪个该由**用户**定（涉及优先级、他今天想推什么）
+       · 而且这一条块本身**没带某个任务的合同/检查点**（那是任务级接续块才有）
+         —— 会话凭它挑一个开工，等于在"要求没定清楚"的情况下动手
+     所以改成两段：**先说清楚我看到什么 → 再请它把选择交给用户。** */
+  body.push('★ 你现在的任务不是"挑一个开工"，而是**先把局面汇报给用户、由他定做哪个**。')
   body.push('')
-  body.push('★ 这个项目现在什么情况、该怎么往下做 —— 见这份说明：')
-  body.push('     D:\\codex-memory\\docs\\接手任务.md')
-  body.push(`  一句话：project_overview(project="${p.key}") 看全貌，`)
-  body.push(`         project_ready_tasks(project="${p.key}") 看有哪些活，`)
-  body.push(`         然后 project_task_dispatch(project="${p.key}", task_key="<挑中的>") 领走。`)
-  body.push('  上面每个任务卡也能单独复制「接续块」—— 里面带着那个任务的合同与交接说明。')
+  body.push('  请照这个顺序做：')
+  body.push('   ① 用 project_overview(project="' + p.key + '") 把全貌看一遍（上面这份是摘要，不是全部）')
+  body.push('   ② 用一两句话告诉用户：这个项目现在什么状态、哪几处卡着、下一步有哪几条路')
+  body.push('   ③ **问用户今天先推哪一件** —— 别自己选。特别是：')
+  body.push('      · 有「被卡住」的任务时，先问他卡住的那件事有没有变化（常常需要他去推动外部）')
+  body.push('      · 有「待验收」的任务时，问他有没有另一个会话来对账（对账人不能是任务所有者）')
+  body.push('   ④ 用户定了之后，去点**那张任务卡**上的「复制接续块」——')
+  body.push('      那一份才带这个任务的合同（要求）和检查点（别人踩过的坑），是真正能开工的指令。')
+  body.push('')
+  body.push('  ⚠ 为什么不让你直接开工：')
+  body.push('    · 这份简报**没有某个任务的要求**（合同、验收判据、别人留下的坑都在任务级那份里）')
+  body.push('    · 先干哪个是**用户的决定**，不是接续会话该替他做的')
+  body.push(`  真要自己领（用户已经说了"你看着办"）：project_ready_tasks(project="${p.key}") 看有哪些活，`)
+  body.push(`    然后 project_task_dispatch(project="${p.key}", task_key="<挑中的>") ——`)
+  body.push('    ⚠ 它返回的 **id（32 位 uuid）才是后面所有工具要的 task_id**，不是那个 key。')
 
   return body.join('\n')
 }
@@ -1773,7 +1849,19 @@ export function projBlock(p: Proj, t?: Task): string {
 
 function repoLine(p: Proj): string[] {
   const root = (p.root || '').trim()
-  return root ? [`仓库：${root}`] : ['仓库：库里没登记这个项目的代码目录（先用 project_for_path 确认工作目录）']
+  /* ⚠ 2026-09-17 改：原来 root 为空时说"库里没登记代码目录（先用 project_for_path 确认工作目录）"。
+     两个毛病：
+       ① project_for_path 用它**也查不出** —— 库里的 root_path 本来就是空的，不是"没查到"
+       ② **有些项目本来就不该有代码目录**（实测：codex-memory / tea-coop 的 root_path 是空的，
+          它们是平台/文档项目）—— 说成"没登记"会让会话以为缺了什么，去找目录、白折腾
+     所以改成如实说"这个项目没有代码目录"，并点明"那是正常的"。 */
+  return root
+    ? [`仓库：${root}`]
+    : [
+        '仓库：这个项目**没有代码目录**（库里 root_path 是空的）。',
+        '      这在有些项目上是**正常的**（比如纯文档/平台类项目）—— 别去找目录、也别当它是缺数据。',
+        '      真要动文件，先问用户"这次改哪个目录"。',
+      ]
 }
 
 /** 解析合同（存的是 jsonb，取出来是 JSON 字符串）。
@@ -1803,9 +1891,20 @@ function parseContract(raw: string): { goal: string; acceptance: string[]; const
 /* 项目描述。scope 为空时给一句兜底，别让新会话只看一个项目名就开始猜。 */
 function projInfo(p: Proj): string[] {
   const scope = (p.scope || '').trim()
+  /* ⚠ 2026-09-17 改：原来这里在 scope 为空时叫会话"先用 project_overview 搞清楚它是什么
+     再动手" —— 但**那句话本身就是它要的信息**，而且面板手上就是没有。
+     实测库里的 scope 长这样：
+       kstage     = 「浙有好市」平台下的唱歌比赛模块。四端：微信小程序（选手/观众/…
+       codex-memory = platform          ← 有些是空/占位的
+     所以：有就照写（这是最省事的一步 —— 接手会话不用再跑一次工具）；
+     没有就**如实说"没写"**，并告诉它"这事先问用户" —— 而不是派它去查一个查不到的东西。 */
   return scope
     ? [`项目：${scope}`, ...repoLine(p)]
-    : [`项目：库里没写这个项目的 scope —— 先用 project_overview(project="${p.key}") 搞清楚它是什么再动手。`, ...repoLine(p)]
+    : [
+        '项目：库里没写这个项目的定位（scope 是空的）—— 所以"它是什么"你得**先问用户**，',
+        '      别自己猜、也别去翻别的项目凑。',
+        ...repoLine(p),
+      ]
 }
 
 /* 前置依赖里，哪些是库里**真实存在的任务**、哪些只是写在名字上。
