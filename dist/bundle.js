@@ -4078,6 +4078,98 @@
   var lookOverride = null;
   var lastMouseMoveAt = -999;
   var lastMouseXY = { x: -9999, y: -9999 };
+  var REACT_TIERS = {
+    1: { state: "notify", hold: 1.6, cooldown: 4, dart: false },
+    // 值得看一眼
+    2: { state: "wide", hold: 1.1, cooldown: 5, dart: true },
+    // 轻瞟一眼
+    3: { state: "alert", hold: 2, cooldown: 8, dart: false }
+    // 这里卡住了
+  };
+  var EVENT_TIER = {
+    /* 收口类：有东西真的完成了 —— 最值得看一眼 */
+    task_reconciled: 1,
+    plan_committed: 1,
+    project_created: 1,
+    /* 落地类：有产出/检查点 —— 中等 */
+    artifact_published: 1,
+    plan_rejected: 3,
+    /* 动静类：有人来了/有活动了 —— 最轻 */
+    task_claimed: 2,
+    task_created: 2,
+    checkpoint_saved: 2,
+    session_registered: 2,
+    handoff_created: 2,
+    code_map_updated: 2,
+    /* 卡住类：这个得让人知道 */
+    task_lease_expired: 3
+  };
+  var lastReactAt = { 1: -999, 2: -999, 3: -999 };
+  var lastReactTier = 0;
+  var reactHold = 0;
+  function reactToLibraryEvent(kind) {
+    const tier = EVENT_TIER[kind];
+    if (!tier) return;
+    const spec = REACT_TIERS[tier];
+    if (!spec) return;
+    const busy = lookOverride !== null && lookOverride.mix > NEAR_MIX || clock - lastMouseMoveAt < 1.5;
+    if (busy) return;
+    if (clock - (lastReactAt[tier] ?? -999) < spec.cooldown) return;
+    if (autoPlistState) {
+      const playing = REACT_TIER_OF_STATE[autoPlistState] ?? 0;
+      const playingIsHeavier = playing !== 0 && playing < tier;
+      if (playingIsHeavier) return;
+    }
+    lastReactAt[tier] = clock;
+    lastReactTier = tier;
+    autoPlistState = spec.state;
+    lastAutoStart = clock;
+    reactHold = spec.hold;
+    setBotState(spec.state, clock);
+    if (spec.dart) {
+      engine.setLook({
+        yaw: (Math.random() - 0.5) * 22,
+        pitch: (Math.random() - 0.5) * 10,
+        mix: 0.5,
+        spin: 0,
+        wander: 0.8
+      }, clock);
+    }
+  }
+  var REACT_TIER_OF_STATE = {
+    notify: 1,
+    wide: 2,
+    alert: 3
+  };
+  var __botReactProbe = () => ({
+    playing: autoPlistState,
+    hold: reactHold,
+    lastTier: lastReactTier,
+    clock,
+    /** 和 reactToLibraryEvent 里 busy 判据**同一套表达式** —— 测试用它守"让位" */
+    busy: lookOverride !== null && lookOverride.mix > NEAR_MIX || clock - lastMouseMoveAt < 1.5,
+    cooldowns: { ...lastReactAt }
+  });
+  var __botReact = reactToLibraryEvent;
+  var __botTickAutoplay = (now) => tickAutoplay(now);
+  var __botSetClock = (t) => {
+    clock = t;
+  };
+  var __botSetLookOverride = (mix) => {
+    lookOverride = mix === null ? null : { yaw: 0, pitch: 0, mix, spin: 0, wander: 0.5 };
+  };
+  var __botSetLastMouseMoveAt = (t) => {
+    lastMouseMoveAt = t;
+  };
+  var __botSetAutoplayEnabled = (on) => {
+    autoplayOff = !on;
+    if (on) {
+      scheduleNextAuto(clock);
+    } else {
+      nextAutoAt = Number.POSITIVE_INFINITY;
+    }
+  };
+  var autoplayOff = false;
   var shapeNextAt = 0;
   var colorNextAt = 0;
   var inkShapeId = DEFAULT_SHAPE;
@@ -4101,11 +4193,12 @@
   function tickAutoplay(now) {
     if (autoPlistState) {
       const st2 = autoPlistState;
-      const hold = ACTION_HOLD[st2] ?? 2.4;
+      const hold = reactHold > 0 ? reactHold : ACTION_HOLD[st2] ?? 2.4;
       if (now - lastAutoStart >= hold) {
         setBotState("idle", now);
         autoPlistState = null;
-        scheduleNextAuto(now);
+        reactHold = 0;
+        if (!autoplayOff) scheduleNextAuto(now);
       }
       return;
     }
@@ -5371,6 +5464,7 @@
     const key = String(d?.kind || "");
     const label = KIND_TEXT[key] || (key ? key.replace(/_/g, " ") : "\u6570\u636E\u6709\u66F4\u65B0");
     if (open) toast(`\u5171\u4EAB\u5E93 \xB7 ${label}`);
+    reactToLibraryEvent(key);
   }
   var syncing = false;
   async function syncNow() {

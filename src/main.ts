@@ -237,6 +237,154 @@ let lastAutoStart = 0
 let lookOverride: any = null   // 鼠标给的注视目标；null = 鼠标很久没动，交还给引擎
 let lastMouseMoveAt = -999     // 鼠标**真的移动**过的时刻（不是收到事件的时刻）
 let lastMouseXY = { x: -9999, y: -9999 }
+
+/* ==================================================================
+   ① 库里发生的事 → 球的反应（2026-09-16 加）
+   ==================================================================
+
+   为什么要它：球有 15 个动作、也有自动播放（4~11 秒一次），
+   但**它的动作全部由 UI 交互触发** —— 开/关/拖/复制。
+   而库里发生的事（另一个会话领了活、发了产出、把任务标完、计划被驳回）
+   面板**已经知道**（SSE 事件流 + 兜底轮询），甚至已经有 18 种事件的中文标签，
+   但**球一个都没用**。
+
+   设计取舍（不按"怎么好看"排，按"值不值得打扰你"排）：
+     · **分级**：不是每种事件都值得蹦一下。领活/建卡只瞟一眼；
+       产出落地给个蓝点；收口/驳回才值得出手。
+     · **限流**：事件是**流**——一次操作可能连出好几条。不限流球会一直抽搐，
+       那就成了噪音，你第一件事会是把它关掉。所以每级各有冷却。
+     · **让位**：用户在跟球互动（鼠标贴近）时**不抢戏** —— 这条沿用 autoplay 的口径。
+     · **不打断正在播的大动作**：autoplay 的演出播到一半被事件打断会很碎。
+       除非事件更重要（tier 1 可以打断 tier 2/3）。
+*/
+type ReactTier = {
+  state: string        /* 播哪个状态 */
+  hold: number         /* 播多久（秒）—— 不依赖 ACTION_HOLD，事件反应要更短更轻 */
+  cooldown: number     /* 这一档最短间隔（秒） */
+  dart: boolean        /* 顺手让视线瞟一下（很轻的那一档） */
+}
+const REACT_TIERS: Record<number, ReactTier> = {
+  1: { state: 'notify', hold: 1.6, cooldown: 4, dart: false },   // 值得看一眼
+  2: { state: 'wide',   hold: 1.1, cooldown: 5, dart: true },    // 轻瞟一眼
+  3: { state: 'alert',  hold: 2.0, cooldown: 8, dart: false },   // 这里卡住了
+}
+/* 事件 → 档位。没列出来的事件**不反应**（宁缺勿滥 —— 球不是事件日志）。
+   名字都取自 daemon 实际会发的事件（KIND_TEXT 那张表是同一批）。 */
+const EVENT_TIER: Record<string, number> = {
+  /* 收口类：有东西真的完成了 —— 最值得看一眼 */
+  task_reconciled: 1,
+  plan_committed: 1,
+  project_created: 1,
+  /* 落地类：有产出/检查点 —— 中等 */
+  artifact_published: 1,
+  plan_rejected: 3,
+  /* 动静类：有人来了/有活动了 —— 最轻 */
+  task_claimed: 2,
+  task_created: 2,
+  checkpoint_saved: 2,
+  session_registered: 2,
+  handoff_created: 2,
+  code_map_updated: 2,
+  /* 卡住类：这个得让人知道 */
+  task_lease_expired: 3,
+}
+let lastReactAt: Record<number, number> = { 1: -999, 2: -999, 3: -999 }
+let lastReactTier = 0
+/* 事件反应想播多久（秒）。0 = 没在播事件反应，走 ACTION_HOLD 的默认口径。
+   为什么事件反应要自己的时长：它比 autoplay 的演出**更短更轻** ——
+   库里掉一条事件不该让球演 3 秒（见 REACT_TIERS 里的 hold）。 */
+let reactHold = 0
+
+/**
+ * 库里发生了一件事 → 球给个反应。由 onLibraryChanged 调。
+ *
+ * ⚠ 为什么用 **clock**（引擎时钟、秒）而不是 Date.now()（毫秒）：
+ *   球所有的时间判断都走 clock（见 tickAutoplay / scheduleNextAuto），
+ *   混用两套时钟会让"冷却"/"让位"这些判断对不上。
+ */
+function reactToLibraryEvent(kind: string): void {  const tier = EVENT_TIER[kind]
+  if (!tier) return                                    /* 没列出来的事件不反应 */
+  const spec = REACT_TIERS[tier]
+  if (!spec) return
+
+  /* 用户在跟球互动 → 让位，不抢戏（和 autoplay 同一条口径） */
+  const busy = (lookOverride !== null && lookOverride.mix > NEAR_MIX) || (clock - lastMouseMoveAt < 1.5)
+  if (busy) return
+
+  /* 冷却：同一档最短间隔 */
+  if (clock - (lastReactAt[tier] ?? -999) < spec.cooldown) return
+
+  /* 正在播：更重要的档可以打断，否则让当前这条播完 */
+  if (autoPlistState) {
+    const playing = REACT_TIER_OF_STATE[autoPlistState] ?? 0
+    const playingIsHeavier = playing !== 0 && playing < tier      /* 数字小 = 更重要 */
+    if (playingIsHeavier) return
+  }
+
+  lastReactAt[tier] = clock
+  lastReactTier = tier
+  autoPlistState = spec.state
+  lastAutoStart = clock
+  reactHold = spec.hold
+  setBotState(spec.state, clock)
+  if (spec.dart) {
+    /* 轻瞟一眼：别每次都是同一个角度（否则看着像机械复位） */
+    engine.setLook({
+      yaw: (Math.random() - 0.5) * 22,
+      pitch: (Math.random() - 0.5) * 10,
+      mix: 0.5, spin: 0,
+      wander: 0.8,
+    }, clock)
+  }
+}
+/* 反查：某个状态是"事件反应"还是"autoplay 演出"。
+   只给事件反应登记 —— autoplay 那些不在表里，值取 0（最轻），
+   所以一次事件可以打断 autoplay，而 autoplay 自己的演出不会被事件打碎两次。 */
+const REACT_TIER_OF_STATE: Record<string, number> = {
+  notify: 1, wide: 2, alert: 3,
+}
+
+/* 测试用：把"事件反应"的内部状态摊出来。
+   为什么要导出：这件事**没法靠看内容断言**（它是"球动了没动、动了几次"），
+   而球是画在 SVG 上的。所以给它一个可读的快照，测试才能守住
+   "分级/限流/让位"这三条不退回。
+
+   ⚠ 顺便暴露 **setClock**：main.ts 里的 `clock` 只在渲染循环（rAF）里推进，
+   而测试把 rAF mock 成了 no-op → **clock 冻在 0** → 所有冷却判断都恒为"在冷却内"。
+   所以测试需要一个能推时钟的口子，否则它测的是一套假的时间。
+   （第一版没暴露它，测试就因为这个假象报了"第一次给反应"失败 —— 见测试文件。） */
+export const __botReactProbe = () => ({
+  playing: autoPlistState,
+  hold: reactHold,
+  lastTier: lastReactTier,
+  clock,
+  /** 和 reactToLibraryEvent 里 busy 判据**同一套表达式** —— 测试用它守"让位" */
+  busy: (lookOverride !== null && lookOverride.mix > NEAR_MIX) || (clock - lastMouseMoveAt < 1.5),
+  cooldowns: { ...lastReactAt },
+})
+export const __botReact = reactToLibraryEvent
+export const __botTickAutoplay = (now: number) => tickAutoplay(now)
+export const __botSetClock = (t: number) => { clock = t }
+/** 模拟"鼠标贴近球"（让位判据的输入）。传 null 恢复成"鼠标没在动"。 */
+export const __botSetLookOverride = (mix: number | null) => {
+  lookOverride = mix === null ? null : { yaw: 0, pitch: 0, mix, spin: 0, wander: 0.5 }
+}
+export const __botSetLastMouseMoveAt = (t: number) => { lastMouseMoveAt = t }
+/** 测试用：把 autoplay 推到很远的将来（或恢复）。
+    为什么需要：autoplay 每 4~11 秒自己播一个动作。测试推时钟时会**撞上它** ——
+    于是断言 `playing === 'wide'` 拿到的是 autoplay 播的 `burst`（实测踩到）。
+    关掉它，测试才只测"事件反应"这一件事。 */
+export const __botSetAutoplayEnabled = (on: boolean) => {
+  autoplayOff = !on
+  if (on) { scheduleNextAuto(clock) } else { nextAutoAt = Number.POSITIVE_INFINITY }
+}
+/* "autoplay 被关掉了"的标记。
+   为什么不能只把 nextAutoAt 设成 Infinity：**tickAutoplay 里那句
+   `scheduleNextAuto(now)`（动作播完时）会把它重排回去** ——
+   实测踩到：关掉之后推一次时钟，autoplay 又活了，测试拿到 `hexagon`。
+   所以要一个**标记**，让"关掉"这件事在重排时也守得住。 */
+let autoplayOff = false
+
 let shapeNextAt = 0            // 下一次换形状
 let colorNextAt = 0            // 下一次换色
 let inkShapeId: string = DEFAULT_SHAPE
@@ -280,11 +428,14 @@ function setBotState(id: string, now: number) {
 function tickAutoplay(now: number) {
   if (autoPlistState) {
     const st = autoPlistState
-    const hold = ACTION_HOLD[st] ?? 2.4
+    /* 事件反应有它自己的时长（更短更轻）；autoplay 走 ACTION_HOLD。 */
+    const hold = reactHold > 0 ? reactHold : (ACTION_HOLD[st] ?? 2.4)
     if (now - lastAutoStart >= hold) {
       setBotState('idle', now)
       autoPlistState = null
-      scheduleNextAuto(now)
+      reactHold = 0
+      /* 被测试关掉时不重排 —— 否则那句 scheduleNextAuto 会把"关掉"撤销 */
+      if (!autoplayOff) scheduleNextAuto(now)
     }
     return
   }
@@ -2097,6 +2248,12 @@ function onLibraryChanged(d: any): void {
   const key = String(d?.kind || '')
   const label = KIND_TEXT[key] || (key ? key.replace(/_/g, ' ') : '数据有更新')
   if (open) toast(`共享库 · ${label}`)
+  /* ② 球也对这件事给个反应（2026-09-16 加）。
+     为什么放在 toast 后面：toast 是给"正在看面板的人"的，球是给
+     "没看面板、但眼睛扫到角落"的人的 —— 两条路各管一拨，不互相等。
+     ⚠ 即使面板关着也要喂给它：**关着的时候才最需要球说一声**
+     （用户不看面板，就靠这个角落里的东西知道'那边有动静了'）。 */
+  reactToLibraryEvent(key)
 }
 
 /* ============ 同步按钮：点一下，把面板拉回与共享库一致 ============
