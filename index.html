@@ -53,7 +53,14 @@
       <!-- 开新项目（2026-09-16 加）：原来**没有任何地方**告诉新会话怎么从零建项目 ——
            四个复制块全是"项目卡上的按钮"，而新项目在面板上还没有卡，一个都点不到。
            放在这一排（右上角）而不是挂项目卡上，正是因为它不属于任何已有项目。 -->
-      <button class="btn btn-ghost btn-newproj" id="newProjBtn" title="复制「开一个新项目」的步骤（给新会话）"><svg class="ic"><use href="#i-plus"/></svg></button>
+      <!-- 开始一个新东西（2026-09-16 加；同日重写内容）：
+           原来**没有任何地方**告诉新会话怎么从零开始 —— 四个复制块全是"项目卡上的按钮"，
+           而新东西在面板上还没有卡，一个都点不到。
+           ⚠ 文案是「开始一个新东西」而不是「开新项目」——因为按真实流程，
+             **第一步是跟用户讨论（走 grill-me skill），不是建项目**：
+             用户可能只有一个想法、或者一份 PPT，没有目录也没有任务。
+             按钮叫"开新项目"会误导会话直接去 bootstrap。 -->
+      <button class="btn btn-ghost btn-newproj" id="newProjBtn" title="复制「开始一个新东西」的做法（先讨论清楚，再建项目）"><svg class="ic"><use href="#i-plus"/></svg></button>
       <button class="btn btn-ghost btn-req" id="reqBtn" title="复制「怎么记录进共享库」的说明"><svg class="ic"><use href="#i-tasks"/></svg></button>
       <button class="btn btn-pin" id="pinBtn" title="钉住面板"><svg class="ic"><use href="#i-pin"/></svg></button>
       <button class="btn btn-ghost" id="closeBtn" title="收起（Esc）"><svg class="ic"><use href="#i-x"/></svg></button>
