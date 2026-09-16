@@ -604,3 +604,19 @@ body.tauri .desk { display: none !important; }
   color: var(--amber);
   font-variant-numeric: tabular-nums;
 }
+
+/* 「让 AI 加新任务」按钮（2026-09-16 加）—— 任务列表下面那个。
+   和任务卡上的 .tcopy 不同：那个悬停才出现（卡上东西多、要安静），
+   这个是页面级的唯一动作，**常驻可见**，否则用户找不到"怎么加任务"。
+   样式沿用 .tcopy 的语言（幽灵按钮），只是不隐藏。 */
+.tadd { padding: 10px 2px 4px; display: flex; justify-content: center; }
+.btn-addtask {
+  display: inline-flex; align-items: center; gap: 5px;
+  font: inherit; font-size: 11px; font-weight: 520; line-height: 1;
+  color: var(--ink); background: #fff; border: 1px solid var(--line-2);
+  border-radius: var(--r-sm); padding: 7px 12px; cursor: pointer;
+  transition: background .16s, border-color .16s, transform .16s;
+}
+.btn-addtask:hover { background: var(--ink); color: #fff; border-color: var(--ink); }
+.btn-addtask:active { transform: scale(.97); }
+.btn-addtask .ic { width: 13px; height: 13px; }
