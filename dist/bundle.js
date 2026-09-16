@@ -3981,7 +3981,7 @@
       `<mask id="${uid}-mask" maskUnits="userSpaceOnUse" x="${-VB}" y="${-VB}" width="${VB * 2}" height="${VB * 2}"><path d="${f.bodyPath}" fill="#fff"/>` + f.eyes.map((e) => `<path d="${e.d}" transform="${e.matrix}" opacity="${e.alpha}" fill="#000"/>`).join("") + (f.notch ? `<circle cx="${f.notch.x}" cy="${f.notch.y}" r="${f.notch.r}" fill="#000"/>` : "") + `</mask>`
     );
     const arc = (side) => f.arcs.map((a) => `<path d="${a[side]}" stroke="url(#${uid}-${a.id})" stroke-width="${a.width}" opacity="${a.opacity}"/>`).join("");
-    return `<defs>${defs.join("")}</defs><g fill="none" stroke-linecap="round">${arc("back")}</g>` + (f.dotsBehind ? `<g>${dotMarkup(f.dots, ink)}</g>` : "") + `<g opacity="${f.bodyAlpha}"><path d="${f.bodyPath}" fill="${PAPER}"/><g mask="url(#${uid}-mask)"><rect x="${-VB}" y="${-VB}" width="${VB * 2}" height="${VB * 2}" fill="${ink}"/></g></g>` + (!f.dotsBehind ? `<g>${dotMarkup(f.dots, ink)}</g>` : "") + (f.notif ? `<circle cx="${f.notif.x}" cy="${f.notif.y}" r="${f.notif.r}" fill="#4b8dff"/>` : "") + `<g fill="none" stroke-linecap="round">${arc("front")}</g>`;
+    return `<g id="perf"><defs>${defs.join("")}</defs><g fill="none" stroke-linecap="round">${arc("back")}</g>` + (f.dotsBehind ? `<g>${dotMarkup(f.dots, ink)}</g>` : "") + `<g opacity="${f.bodyAlpha}"><path d="${f.bodyPath}" fill="${PAPER}"/><g mask="url(#${uid}-mask)"><rect x="${-VB}" y="${-VB}" width="${VB * 2}" height="${VB * 2}" fill="${ink}"/></g></g>` + (!f.dotsBehind ? `<g>${dotMarkup(f.dots, ink)}</g>` : "") + (f.notif ? `<circle cx="${f.notif.x}" cy="${f.notif.y}" r="${f.notif.r}" fill="#4b8dff"/>` : "") + `<g fill="none" stroke-linecap="round">${arc("front")}</g></g>`;
   }
   var ballEl = document.getElementById("ball");
   window.addEventListener("DOMContentLoaded", () => {
@@ -4005,7 +4005,13 @@
     if (inkT < 1) inkT = Math.min(1, inkT + dt / INK_DUR);
     tickAutoplay(clock);
     tickAutoSkin(clock);
+    tickPerform(clock);
     svg.innerHTML = frameMarkup(engine.sample(clock), curInk());
+    const perfG = svg.querySelector("#perf");
+    if (perfG) {
+      const tr = performTransform(clock);
+      if (tr) perfG.setAttribute("transform", tr);
+    }
     requestAnimationFrame(tick);
   }
   initTauri().then(async () => {
@@ -4233,6 +4239,111 @@
   var __botMoodProbe = () => ({ mood: botMood, at: moodAt, vitality: MOOD_VITALITY[botMood] });
   var __botApplyMood = (now) => applyMood(now);
   var __botApplyProjects = (list) => applyProjects(list);
+  var IDENT = { dx: 0, dy: 0, rot: 0, cx: 0, cy: 0, sx: 1, sy: 1 };
+  function damped(t, cycles, decay) {
+    return Math.sin(t * Math.PI * 2 * cycles) * Math.exp(-t * decay);
+  }
+  var PERF = [
+    {
+      /* ---- 蹦（2 下）----
+         位移只用 0.26R（约 41 单位 ≈ 7px）—— 保守，因为向上只有 22px；
+         主要靠压扁（落地 sx 1.20 / sy 0.78）和拉伸（起跳/stretch sy 1.10）骗眼睛。 */
+      id: "hop",
+      hold: 1.9,
+      frame: (t) => {
+        const up = Math.max(0, damped(t, 2, 3.2));
+        const land = Math.max(0, -damped(t, 2, 3.2));
+        return {
+          dx: 0,
+          dy: -up * 41,
+          rot: 0,
+          cx: 0,
+          cy: 0,
+          sx: 1 + land * 0.2 - up * 0.06,
+          sy: 1 - land * 0.22 + up * 0.1
+        };
+      }
+    },
+    {
+      /* ---- 转两个圈 ----
+         绕自己中心转 720°。前 85% 转完，剩下 15% 让它停稳（easeOutQuint 的味道）。 */
+      id: "spin2",
+      hold: 2.6,
+      frame: (t) => {
+        const k = t < 0.85 ? 1 - Math.pow(1 - t / 0.85, 3) : 1;
+        return { ...IDENT, rot: 720 * k };
+      }
+    },
+    {
+      /* ---- 荡秋千 ----
+         绕球**上方**一个支点摆 —— 支点取球顶再往上一点（球心上方 0.55R ≈ 87 单位）。
+         摆幅 ±34°，用阻尼正弦（像真的荡了两下慢慢停下来）。
+         ⚠ rotate 的 cx,cy 就是支点：这样球是"吊着"摆的，不是原地转。 */
+      id: "swing",
+      hold: 3,
+      frame: (t) => ({
+        ...IDENT,
+        rot: damped(t, 2, 1.6) * 34,
+        cx: 0,
+        cy: -(R2 * 0.55)
+      })
+    }
+  ];
+  var perf = null;
+  var midLastAt = -1e9;
+  var bigLastAt = -1e9;
+  var MID_GAP = 20;
+  var BIG_GAP = 40;
+  function dueGap(now) {
+    const midDue = now - midLastAt - MID_GAP;
+    const bigDue = now - bigLastAt - BIG_GAP;
+    if (midDue < 0 && bigDue < 0) return null;
+    return { playBig: bigDue >= midDue };
+  }
+  function tickPerform(now) {
+    if (perf) {
+      const t = (now - perf.start) / perf.spec.hold;
+      if (t >= 1) perf = null;
+      return;
+    }
+    if (!ballEl.classList.contains("settled")) return;
+    if (autoPlistState) return;
+    const busy = lookOverride !== null && lookOverride.mix > NEAR_MIX || now - lastMouseMoveAt < 1.5;
+    if (busy) return;
+    if (now < visualHoldUntil) return;
+    const gap = dueGap(now);
+    if (!gap) return;
+    const pool = gap.playBig ? ["hop", "spin2"] : ["swing"];
+    const wanted = pool[Math.floor(Math.random() * pool.length)];
+    const spec = PERF.find((p) => p.id === wanted) ?? null;
+    if (!spec) return;
+    perf = { spec, start: now };
+    if (gap.playBig) bigLastAt = now;
+    else midLastAt = now;
+  }
+  function performTransform(now) {
+    if (!perf) return "";
+    const t = (now - perf.start) / perf.spec.hold;
+    const f = perf.spec.frame(Math.max(0, Math.min(1, t)));
+    const bits = [];
+    if (f.dx || f.dy) bits.push(`translate(${f.dx.toFixed(2)} ${f.dy.toFixed(2)})`);
+    if (f.rot) bits.push(`rotate(${f.rot.toFixed(2)} ${f.cx.toFixed(2)} ${f.cy.toFixed(2)})`);
+    if (f.sx !== 1 || f.sy !== 1) bits.push(`scale(${f.sx.toFixed(4)} ${f.sy.toFixed(4)})`);
+    return bits.join(" ");
+  }
+  var __botPerfProbe = () => ({
+    playing: perf && perf.spec ? perf.spec.id : null,
+    hasSpec: !!(perf && perf.spec),
+    /* 诊断用：perf 有对象但 spec 丢了就是这个 */
+    transform: performTransform(clock),
+    midLastAt,
+    bigLastAt,
+    midGap: MID_GAP,
+    bigGap: BIG_GAP,
+    clock
+  });
+  var __botPerfSpecs = () => PERF.map((p) => ({ id: p.id, hold: p.hold, frame: p.frame }));
+  var __botPerfTick = (now) => tickPerform(now);
   var shapeNextAt = 0;
   var colorNextAt = 0;
   var inkShapeId = DEFAULT_SHAPE;

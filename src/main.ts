@@ -61,14 +61,22 @@ function frameMarkup(f: BotFrame, ink: string): string {
     `</mask>`)
   const arc = (side: 'back' | 'front') =>
     f.arcs.map((a) => `<path d="${a[side]}" stroke="url(#${uid}-${a.id})" stroke-width="${a.width}" opacity="${a.opacity}"/>`).join('')
-  return `<defs>${defs.join('')}</defs>` +
+  /* ★ 全部内容包进一个 <g id="perf"> —— 这是 ③ 的"表演层"落点（2026-09-16 加）。
+     为什么能这么简单：SVG 里**每个元素都用绝对坐标画**（见上面那些 x/y/cx/cy），
+     所以在外层套一个 <g transform="…"> 就等于"把整张画面搬动/旋转/压扁"，
+     引擎那 15 个状态的几何一个都不用改。
+     ⚠ 为什么不把 transform 加到 <svg> 自己身上：它的 transform 已经被
+       `.ball svg { transform: scale(var(--bot-scale)) }` 占了（动作缩放），
+       而且 `.ball` 上还有入场动画和 hover 缩放 —— 三个东西**都在抢 transform**。
+       包一层 <g> 是唯一不打架的做法。 */
+  return `<g id="perf">` + `<defs>${defs.join('')}</defs>` +
     `<g fill="none" stroke-linecap="round">${arc('back')}</g>` +
     (f.dotsBehind ? `<g>${dotMarkup(f.dots, ink)}</g>` : '') +
     `<g opacity="${f.bodyAlpha}"><path d="${f.bodyPath}" fill="${PAPER}"/>` +
     `<g mask="url(#${uid}-mask)"><rect x="${-VB}" y="${-VB}" width="${VB * 2}" height="${VB * 2}" fill="${ink}"/></g></g>` +
     (!f.dotsBehind ? `<g>${dotMarkup(f.dots, ink)}</g>` : '') +
     (f.notif ? `<circle cx="${f.notif.x}" cy="${f.notif.y}" r="${f.notif.r}" fill="#4b8dff"/>` : '') +
-    `<g fill="none" stroke-linecap="round">${arc('front')}</g>`
+    `<g fill="none" stroke-linecap="round">${arc('front')}</g>` + `</g>`
 }
 
 const ballEl = document.getElementById('ball') as HTMLDivElement
@@ -94,7 +102,15 @@ function tick(now: number) {
   if (inkT < 1) inkT = Math.min(1, inkT + dt / INK_DUR)
   tickAutoplay(clock)     /* 动作：没人理它的时候自己动 */
   tickAutoSkin(clock)     /* 形状与颜色：节奏更慢，和动作错开 */
+  tickPerform(clock)      /* ③ 大动作：蹦/转圈/荡秋千（整个画面搬动） */
   svg.innerHTML = frameMarkup(engine.sample(clock), curInk())
+  /* ③ 把这一帧的表演变换**设在 <g id="perf"> 上**（见 frameMarkup 里的说明）。
+     为什么要重新取一次元素：上一行刚把 innerHTML 换掉，旧的 g 已经被丢了。 */
+  const perfG = svg.querySelector('#perf')
+  if (perfG) {
+    const tr = performTransform(clock)
+    if (tr) perfG.setAttribute('transform', tr)
+  }
   requestAnimationFrame(tick)
 }
 
@@ -469,6 +485,180 @@ export const __botApplyMood = (now: number) => applyMood(now)
 /** 测试用：走**完整链路**（applyProjects → 心情）——
     只测 applyMood 是测不出"数据 → 心情"那一段的。 */
 export const __botApplyProjects = (list: any[]) => applyProjects(list)
+
+/* ==================================================================
+   ③ 大动作：蹦 / 转圈 / 荡秋千（2026-09-16 加）
+   ==================================================================
+
+   ## 用户要的
+
+   "比如上下蹦一蹦 没事干 然后转两个圈圈啥的 荡荡秋千啊这种"
+
+   ## ★ 先说物理边界（这决定"大"能多大）
+
+     窗口 560×660 · 球 54px · 钉在 right:22px / top:22px
+     → **向右只有 22px、向上只有 22px** 就顶到窗口边，再往外被裁。
+     （向下/向左各有 538px，但球在右上角，向下蹦会跑进面板区域。）
+
+     SVG 是 55×55px 装 viewBox 316×316 单位 → **1 单位 ≈ 0.1741px**，
+     所以 22px ≈ **126 个 SVG 单位 ≈ 0.40R**（R=158）。
+
+   ⇒ **"蹦"靠「压扁 + 拉伸」骗眼睛，不靠大位移。**
+     这是动画里的常规做法（squash & stretch），而且**正好绕开窗口限制**。
+
+   ## 三个动作怎么实现的（都不改引擎）
+
+     把整张画面包进 `<g id="perf">`（见 frameMarkup），每帧改它的 transform：
+       蹦    : translate(0, -bounce)  +  scale(sx, sy)   ← 压扁拉伸 + 小位移
+       转圈  : rotate(angle) 绕自己中心
+       荡秋千: rotate(±35°) 绕**球上方一个支点**（transform 里的 rotate 带 cx,cy）
+
+   ## 节奏（用户 2026-09-16 定）
+
+     中动作 20 秒左右 · 大动作 40 秒左右
+*/
+type PerfSpec = {
+  id: string
+  hold: number                     /* 播多久（秒） */
+  /** 归一化进度 t∈[0,1] → 这一帧的变换 */
+  frame: (t: number) => { dx: number; dy: number; rot: number; cx: number; cy: number; sx: number; sy: number }
+}
+const IDENT = { dx: 0, dy: 0, rot: 0, cx: 0, cy: 0, sx: 1, sy: 1 }
+
+/* 阻尼正弦（回弹）。n 个半周期，末端趋近 0 —— 蹦完自然落定。 */
+function damped(t: number, cycles: number, decay: number): number {
+  return Math.sin(t * Math.PI * 2 * cycles) * Math.exp(-t * decay)
+}
+
+const PERF: PerfSpec[] = [
+  {
+    /* ---- 蹦（2 下）----
+       位移只用 0.26R（约 41 单位 ≈ 7px）—— 保守，因为向上只有 22px；
+       主要靠压扁（落地 sx 1.20 / sy 0.78）和拉伸（起跳/stretch sy 1.10）骗眼睛。 */
+    id: 'hop', hold: 1.9,
+    frame: (t) => {
+      const up = Math.max(0, damped(t, 2, 3.2))          /* 只取正的半周期 = 离地 */
+      const land = Math.max(0, -damped(t, 2, 3.2))       /* 负的 = 落地压扁 */
+      return {
+        dx: 0,
+        dy: -up * 41,
+        rot: 0, cx: 0, cy: 0,
+        sx: 1 + land * 0.20 - up * 0.06,
+        sy: 1 - land * 0.22 + up * 0.10,
+      }
+    },
+  },
+  {
+    /* ---- 转两个圈 ----
+       绕自己中心转 720°。前 85% 转完，剩下 15% 让它停稳（easeOutQuint 的味道）。 */
+    id: 'spin2', hold: 2.6,
+    frame: (t) => {
+      const k = t < 0.85 ? (1 - Math.pow(1 - t / 0.85, 3)) : 1
+      return { ...IDENT, rot: 720 * k }
+    },
+  },
+  {
+    /* ---- 荡秋千 ----
+       绕球**上方**一个支点摆 —— 支点取球顶再往上一点（球心上方 0.55R ≈ 87 单位）。
+       摆幅 ±34°，用阻尼正弦（像真的荡了两下慢慢停下来）。
+       ⚠ rotate 的 cx,cy 就是支点：这样球是"吊着"摆的，不是原地转。 */
+    id: 'swing', hold: 3.0,
+    frame: (t) => ({
+      ...IDENT,
+      rot: damped(t, 2, 1.6) * 34,
+      cx: 0,
+      cy: -(R * 0.55),
+    }),
+  },
+]
+
+let perf: { spec: PerfSpec; start: number } | null = null
+/* 中动作 20 秒 / 大动作 40 秒（用户 2026-09-16 定）。两条线各有各的"上次播的时刻"。 */
+let midLastAt = -1e9
+let bigLastAt = -1e9
+const MID_GAP = 20
+const BIG_GAP = 40
+
+/**
+ * 该不该出一场表演；该出就挑一条 —— **欠账最多的那条优先**。
+ *
+ * ★ 这里改过三次，前两版都是自找的麻烦（记下来免得再犯）：
+ *   第一版 `bigDue = now >= bigNextAt` → 大动作一旦过期就永远优先，把中动作挤死。
+ *   第二版 改成"比谁到期更早" → 两个都过期时只推一条、另一条悬在过去，
+ *          结果 **swing 连播 215 次**。
+ *   第三版 想用"播完再重算"，但那句 `midWrap = midNextAt <= now` 在
+ *          **动作播完之后**才求值，而那一刻 mid 早就在过去了 → 又错。
+ *
+ *   正解（这一版）：**不存"下次该在什么时候"，只存"上次是何时"** ——
+ *   然后算 `欠账 = 现在 - 上次 - 间隔`，谁欠得多谁先上。
+ *   没有边界相等的问题、没有旗标过期的问题，也不需要"顺手推另一条"。
+ *   而且它天然是"两者交替、各按各的间隔走"。
+ */
+function dueGap(now: number): { playBig: boolean } | null {
+  const midDue = now - midLastAt - MID_GAP
+  const bigDue = now - bigLastAt - BIG_GAP
+  if (midDue < 0 && bigDue < 0) return null
+  return { playBig: bigDue >= midDue }
+}
+
+/**
+ * 每帧调：推进表演 + 到点了就挑一个。
+ *
+ * ⚠ 闸门（和 autoplay 同一套口径 —— 不许另起一套）：
+ *   · 用户在跟球互动 → 让位
+ *   · 有动作在播（autoplay / 事件反应）→ 不抢
+ *   · 入场动画还没落定 → 不抢（那一套自己就有 2.6 秒的戏）
+ */
+function tickPerform(now: number): void {
+  if (perf) {
+    const t = (now - perf.start) / perf.spec.hold
+    if (t >= 1) perf = null               /* 播完就清空；"上次何时"在开演时就记了 */
+    return
+  }
+  if (!ballEl.classList.contains('settled')) return      /* 入场还没结束 */
+  if (autoPlistState) return                             /* 有动作在播，不抢 */
+  const busy = (lookOverride !== null && lookOverride.mix > NEAR_MIX) || (now - lastMouseMoveAt < 1.5)
+  if (busy) return
+  if (now < visualHoldUntil) return
+  const gap = dueGap(now)
+  if (!gap) return
+  const pool = gap.playBig ? ['hop', 'spin2'] : ['swing']
+  const wanted = pool[Math.floor(Math.random() * pool.length)]
+  /* ⚠ 这里原来写的是 `PERF.find(...)!` —— 那个 `!` 把"找不到"悄悄变成
+     `undefined`，然后 `perf.spec.id` 在探针里炸（TypeError，排查了一轮）。
+     **类型断言不是检查**。现在显式兜底：找不到就当作没到点、下次再来。 */
+  const spec = PERF.find((p) => p.id === wanted) ?? null
+  if (!spec) return
+  perf = { spec, start: now }
+  /* ★ 记"上次是何时" —— 用**开演时刻**，不是播完时刻。
+     这样"间隔"的含义是"两次表演之间隔多久"，符合直觉。
+     （也正因为如此，闸门被挡住时不记 —— 下次再试还是同样的欠账。） */
+  if (gap.playBig) bigLastAt = now
+  else midLastAt = now
+}
+
+/** 这一帧该给 `<g id="perf">` 的 transform。没在表演时是空串（零开销）。 */
+function performTransform(now: number): string {
+  if (!perf) return ''
+  const t = (now - perf.start) / perf.spec.hold
+  const f = perf.spec.frame(Math.max(0, Math.min(1, t)))
+  const bits: string[] = []
+  if (f.dx || f.dy) bits.push(`translate(${f.dx.toFixed(2)} ${f.dy.toFixed(2)})`)
+  if (f.rot) bits.push(`rotate(${f.rot.toFixed(2)} ${f.cx.toFixed(2)} ${f.cy.toFixed(2)})`)
+  if (f.sx !== 1 || f.sy !== 1) bits.push(`scale(${f.sx.toFixed(4)} ${f.sy.toFixed(4)})`)
+  return bits.join(' ')
+}
+
+/* 测试钩子：表演层没法靠看内容断言（它是"画面上动了几度"），给个可读快照 */
+export const __botPerfProbe = () => ({
+  playing: perf && perf.spec ? perf.spec.id : null,
+  hasSpec: !!(perf && perf.spec),          /* 诊断用：perf 有对象但 spec 丢了就是这个 */
+  transform: performTransform(clock),
+  midLastAt, bigLastAt, midGap: MID_GAP, bigGap: BIG_GAP, clock,
+})
+/** 导出规格表本身 —— 测试要独立验每个动作的**幅度**（见测试里的物理边界那条）。 */
+export const __botPerfSpecs = () => PERF.map((p) => ({ id: p.id, hold: p.hold, frame: p.frame }))
+export const __botPerfTick = (now: number) => tickPerform(now)
 
 let shapeNextAt = 0            // 下一次换形状
 let colorNextAt = 0            // 下一次换色
