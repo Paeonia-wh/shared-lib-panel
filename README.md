@@ -131,6 +131,9 @@ sequenceDiagram
 
 ## 快速开始
 
+> **用 AI 部署的话，把 [`docs/部署.md`](docs/部署.md) 丢给它就行** ——
+> 那份文档就是写给 AI 会话看的（含全部环境变量、验证步骤、故障对照表）。
+
 ### 路线 A · 只想用（**推荐**，不装任何编译工具）
 
 **[⬇ 下载 shared-lib-panel.exe（8.1 MB）](https://github.com/Paeonia-wh/shared-lib-panel/releases/download/v0.10/shared-lib-panel.exe)**
