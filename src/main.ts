@@ -1251,6 +1251,15 @@ export function projBlock(p: Proj, t?: Task): string {
   body.push(`     project_ready_tasks(project="${p.key}")，挑一个"还没人领"的，`)
   body.push(`     然后 project_task_dispatch(project="${p.key}", task_key="<挑中的那个>") 领走并拿到 id。`)
   body.push('     上面每个任务卡也能单独复制接续块，里面带着那个任务的完整交接说明。')
+  /* 这里补一句判据提示（2026-09-16）。为什么需要：
+     这句原来由 discipline() 带进来 —— 而 discipline 里那套引导被删掉了
+     （它是"建卡怎么写判据"，不属于纪律，且导致每个块里重复一遍）。
+     删完发现：现状简报块就**完全没有判据提示**了（实测确认），
+     而它也用得上 —— 现有验收标准若是散文，可以顺手补成判据。
+     所以这里保留一句**短的**（长的那套在"加新任务"块里，不重复）。 */
+  body.push('  4) 合同里的验收标准若还是散文，可以顺手补成**可判定的判据**（平台会按判据拦 done）：')
+  body.push('     file_exists:<路径> / tests_pass:<命令> / grep_absent:<路径>::<文本> 等，')
+  body.push('     要点是把**具体路径 / 具体命令 / 具体 URL** 写出来（详见「加新任务」块）。')
   body.push(...discipline())
   return body.join('\n')
 }
@@ -1319,6 +1328,24 @@ function danglingDeps(p: Proj, t: Task): string[] {
   const known = new Set(p.tasks.map((x) => x.key))
   return t.depends.filter((d) => !known.has(d))
 }
+/* 判据引导 —— 一个公共片段，被 discipline() 和 splitBlock() 共用。
+   ⚠ 为什么要提取（2026-09-16）：这两个地方原来各写了一份完整的判据引导，
+   于是**同一个块复制出去，同一件事说了两遍**（实测 7 个事实重复、约 700 字）。
+   提取成一份之后：每块里只出现一次，而且两处**内容永远一致**（不会漂移）。 */
+function predicateGuide(indent = '      '): string[] {
+  return [
+    'file_exists:<路径> / no_placeholders:<路径> / grep_absent:<路径>::<文本> /',
+    'sha256:<路径>::<摘要> / tests_pass:<命令> / endpoint_ok:<URL>',
+    '要点：把**具体路径 / 具体命令 / 具体 URL** 写出来 ——',
+    '  "测试全部通过"没用（不知道跑什么）→ "测试 npm test 全部通过"才行；',
+    '  "结论回写文档"没用 → "结论回写 docs/xxx.md"才行。',
+    '⚠ **别指望事后自动转换**：实测全库 176 条验收标准自动提判据只提出 9 条（5%），',
+    '  且全是"提到了某个具体文件"那类 —— "功能可用"这种话里本来就没有可判定的东西。',
+    '  判据只能**写合同的时候顺手写**；拿不准能不能判就跑一下 preflight，它会告诉你。',
+  ].map((l) => indent + l)
+}
+
+
 
 /* 收尾纪律。三条都是实战里踩出来的：报错要照贴、格式不合法要降级、完成由对账说了算。 */
 function discipline(): string[] {
@@ -1332,9 +1359,8 @@ function discipline(): string[] {
     '      ★ 平台还会**替你拦一道**：合同里写了可判定判据、而判据没过时，',
     '        标 done 会被**直接拒绝**，报错列出没过的那几条和证据。',
     '        （**纯散文**验收标准的合同不受此限 —— 那种由独立对账裁定。）',
-    '      动手前先问自己：**这活真做完了吗？** 没做完就按实际留状态：',
-    '        · 还要接着做 → 留 pending    · 卡在外部原因 → status="blocked"',
-    '        · 干完了等别人验 → status="review"',
+    '      动手前先问自己：**这活真做完了吗？** 没做完就按实际留状态（pending / blocked / review），',
+    '      别为了收尾硬标 done。',
     '    · 任何工具报错，把**报错原文**照贴回来（含工具名和完整 message），不要改述、不要假装成功。',
     '    · 顺序最关键：**先领任务 → 动手 → 更新代码地图 → 检查点/产出 → 最后才标 done**。',
     '      先标 done 会**发不出产出**（artifact_publish 要求任务在你名下且是活跃任务）。',
@@ -1344,15 +1370,7 @@ function discipline(): string[] {
     '      看到 review 状态的任务**别重做** —— 那是"等验收"，去对账（同上）。',
     '    · **标 done 之前先跑一遍验收判据**：project_preflight(project=…, task_id=<id>)',
     '      它执行合同里的可判定判据，告诉你哪条还没过 —— 在**还能改**的时候看到。',
-    '      所以写合同时尽量把验收标准写成判据（自然语言可以照写，只是不会被自动验）：',
-    '        file_exists:<路径> / no_placeholders:<路径> / grep_absent:<路径>::<文本> /',
-    '        sha256:<路径>::<摘要> / tests_pass:<命令> / endpoint_ok:<URL>',
-    '      要点：把**具体路径 / 具体命令 / 具体 URL** 写出来 ——',
-    '        "测试全部通过"没用（不知道跑什么）→ "测试 npm test 全部通过"才行；',
-    '        "结论回写文档"没用 → "结论回写 docs/xxx.md"才行。',
-    '      ⚠ **别指望事后自动转换**：实测全库 176 条验收标准自动提判据只提出 9 条（5%），',
-    '        且全是"提到了某个具体文件"那类 —— "功能可用"这种话里本来就没有可判定的东西。',
-    '        判据只能**写合同的时候顺手写**；拿不准能不能判就跑一下 preflight，它会告诉你。',
+    '      （判据**怎么写**在建卡那一步讲；自然语言验收标准照旧可以写，只是不会被自动验。）',
     '    · **定下来的设计/技术取舍，顺手记进库** —— 否则下个会话会把同样的事重新讨论一遍：',
     '      project_decision(project=…, task_id=<id>, title="<一句结论>", decision="<定了什么>",',
     '                       rationale="<为什么这么定>", evidence=[<文件路径/命令/链接>])',
@@ -1450,14 +1468,12 @@ export function splitBlock(p: Proj): string {
   body.push('     ⚠ 还有一条：**平台不允许改任务名 / 说明**（project_task_update 只改 status / next_action）。')
   body.push('       所以"范围变了"要靠**更新合同**或建新卡解决，不要指望改名。')
   body.push('  5) 写验收标准时**尽量写成可判定的判据**（建卡时最该花心思的一步）：')
-  body.push('       file_exists:<路径> / no_placeholders:<路径> / grep_absent:<路径>::<文本> /')
-  body.push('       sha256:<路径>::<摘要> / tests_pass:<命令> / endpoint_ok:<URL>')
-  body.push('     要点：把**具体路径 / 具体命令 / 具体 URL** 写出来 ——')
-  body.push('       "测试全部通过"没用（不知道跑什么）→ "测试 npm test 全部通过"才行；')
-  body.push('       "结论回写文档"没用 → "结论回写 docs/xxx.md"才行。')
-  body.push('     为什么值得：平台会**按判据拦 done**（判据没过就拒绝标 done），判据是你那道门。')
-  body.push('     ⚠ 别指望自动转换：实测全库 176 条验收标准自动提判据**只提出 9 条**（5%）。')
-  body.push('     拿不准能不能判，建完卡跑 project_preflight，它会说哪条可判、哪条不可判。')
+  /* ⚠ 这里原来自己又写了一遍完整判据引导 —— 而 discipline() 里已经有一份，
+     于是同一个块里同一件事说了两遍（实测 7 个事实重复、约 700 字）。
+     现在共用 predicateGuide()：只出现一次，且两处内容永远一致。 */
+  body.push('     为什么值得：平台会**按判据拦 done**（判据没过就拒绝标 done），判据是你那道门：')
+  body.push('     下面这段写法每个块都有，别跳过 ——')
+  body.push(...predicateGuide('     '))
   body.push('  6) ★ 建卡这条路分两种情况（先确认是哪一种，别撞墙）：')
   body.push('     · 先登记自己（没登记后面所有写操作都会失败）：')
   body.push(`       project_session_register(project="${p.key}", provider="<你的 provider>",`)
